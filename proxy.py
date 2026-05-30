@@ -776,6 +776,17 @@ def dashboard():
     return open(_DASH).read()
 
 
+@app.get("/img/{path:path}")
+def serve_img(path: str):
+    import mimetypes
+    from fastapi.responses import FileResponse
+    img_path = os.path.join(_DIR, "img", path)
+    if not os.path.exists(img_path):
+        return {"error": "not found"}, 404
+    mime, _ = mimetypes.guess_type(img_path)
+    return FileResponse(img_path, media_type=mime or "application/octet-stream")
+
+
 @app.get("/logs", response_class=HTMLResponse)
 def logs_page():
     return """<!DOCTYPE html>
