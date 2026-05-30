@@ -35,8 +35,6 @@ Full spend analytics at `http://localhost:8082/dashboard`:
 - **Session view** — every conversation: tokens in/out, cost, tools used
 - **RAW Logs** — last 500 requests with full prompt preview
 - **Health grade A–F** — scores your efficiency and tells you what to fix
-<img width="1587" height="499" alt="image" src="https://github.com/user-attachments/assets/685ad792-f452-4ade-bcf5-555b44950a1e" />
-
 
 ### 🍎 macOS Menu Bar Widget
 Always-visible cost tracker in your menu bar. Click to see:
