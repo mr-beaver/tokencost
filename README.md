@@ -68,7 +68,7 @@ Smart Routing scores each prompt 0–10 (length, keywords, code presence) and si
 
 **Step 1 — first time only:**
 ```bash
-git clone https://github.com/mr-beaver/tokencost && cd tokencost && bash onbording.sh
+cd ~ && git clone https://github.com/mr-beaver/tokencost && cd tokencost && bash onbording.sh
 ```
 
 The setup script installs everything and adds a `tokencost` command to your terminal.
