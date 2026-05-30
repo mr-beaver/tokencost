@@ -1153,28 +1153,28 @@ struct MenuBarView: View {
                         .foregroundColor(model.gradeColor.opacity(0.7))
                 }
             }
-            VStack(alignment: .leading, spacing: 2) {
-                Text("v\(model.currentVersion)")
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .foregroundColor(model.versionUpToDate ? .secondary : accentOrange)
-                Button {
-                    Task { await model.fetchVersion() }
-                } label: {
-                    Text(model.versionUpToDate ? "✓ up to date" : "update available")
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundColor(model.versionUpToDate ? Color.green.opacity(0.8) : accentOrange)
-                        .underline(!model.versionUpToDate)
+            HStack(spacing: 12) {
+                HStack(spacing: 4) {
+                    Text("v\(model.currentVersion)")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundColor(model.versionUpToDate ? .secondary : accentOrange)
+                    Button {
+                        Task { await model.fetchVersion() }
+                    } label: {
+                        Text(model.versionUpToDate ? "✓" : "⬆")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(model.versionUpToDate ? Color.green.opacity(0.8) : accentOrange)
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
+                Spacer()
+                Button("Dashboard ↗") {
+                    NSWorkspace.shared.open(URL(string: "http://localhost:8082/dashboard")!)
+                }
+                .buttonStyle(.plain).font(.system(size: 9, design: .monospaced)).foregroundColor(.accentColor)
+                Button("Quit") { NSApplication.shared.terminate(nil) }
+                    .buttonStyle(.plain).font(.system(size: 9, design: .monospaced)).foregroundColor(.secondary)
             }
-            Spacer()
-            Button("Open Dashboard ↗") {
-                NSWorkspace.shared.open(URL(string: "http://localhost:8082/dashboard")!)
-            }
-            .buttonStyle(.plain).font(monoSm).foregroundColor(.accentColor)
-            Divider().frame(height: 14)
-            Button("Quit") { NSApplication.shared.terminate(nil) }
-                .buttonStyle(.plain).font(monoSm).foregroundColor(.secondary)
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
     }
