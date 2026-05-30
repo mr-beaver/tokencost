@@ -5,7 +5,10 @@
 A local proxy that sits between your tools and the LLM APIs. It tracks every token, calculates real costs, and optimizes requests on the fly. Works with Claude Code, VS Code, Claude Desktop, OpenAI, Groq, and 12+ other providers.
 
 <img width="1592" height="480" alt="image" src="https://github.com/user-attachments/assets/8931958f-c0a2-4b21-b3fe-85c857d10704" />
-
+<img width="1597" height="1214" alt="image" src="https://github.com/user-attachments/assets/d89c62f7-7270-4084-86f2-0760ff3315b0" />
+<img width="1601" height="969" alt="image" src="https://github.com/user-attachments/assets/1191d3f7-9d24-4b83-9a78-6b22dc63fb69" />
+<img width="1600" height="1192" alt="image" src="https://github.com/user-attachments/assets/8d1bd53f-29f6-4705-9208-edb0a39d3d4f" />
+<img width="611" height="826" alt="image" src="https://github.com/user-attachments/assets/25e2c1da-29f2-4329-bcdd-1202fe0d747e" />
 
 ---
 
