@@ -2,7 +2,7 @@
 
 **Know exactly what you spend on AI — and automatically spend less.**
 
-A local proxy that sits between your tools and the LLM APIs. It tracks every token, calculates real costs, and optimizes requests on the fly. Works with Claude Code, VS Code, Claude Desktop, OpenAI, Groq, and 12+ other providers.
+A local proxy that sits between your tools and the LLM APIs. It tracks every token, calculates real costs, and optimizes requests on the fly. Works with Claude Code, VS Code, Claude Desktop, OpenClaw, and 15+ API providers (OpenAI, Groq, Mistral, DeepSeek, xAI, Perplexity, Cerebras, Together, Fireworks, Cohere, OpenRouter, Ollama, Amazon Bedrock, Google Gemini, and more).
 
 <img width="1597" height="1214" alt="image" src="https://github.com/user-attachments/assets/d89c62f7-7270-4084-86f2-0760ff3315b0" />
 <img width="1601" height="969" alt="image" src="https://github.com/user-attachments/assets/1191d3f7-9d24-4b83-9a78-6b22dc63fb69" />
@@ -29,7 +29,7 @@ Full spend analytics at `http://localhost:8082/dashboard`:
 - **Cost by day / week / month** — trend chart with daily breakdown
 - **By task type** — Coding vs Shell vs Agent vs Planning vs Web
 - **By model** — Claude Haiku / Sonnet / Opus / GPT-4o / etc.
-- **By source** — VS Code, CLI, OpenClaw, Desktop, LiteLLM
+- **By source** — Claude Code, Claude Desktop, VS Code Extensions (Cline, Roo Code, Kilo Code, IBM Bob), OpenClaw, API providers
 - **Cache analytics** — hit rate, money saved vs. what you'd pay without caching
 - **Session view** — every conversation: tokens in/out, cost, tools used
 - **RAW Logs** — last 500 requests with full prompt preview

@@ -40,7 +40,7 @@ http://localhost:8082/dashboard
 - **How to Reduce Costs** — action plan with concrete savings ($X/mo) and health grade (A–F)
 - **By Activity** — breakdown by task type (Code/Bash/Agent/Web/Plan/Search) with columns: turns, 1-shot%, avg input, cost
 - **Spend Trend** — cost chart by day
-- **By Source** — who's spending (VS Code, CLI, OpenClaw, LiteLLM...) with inline cache hit rate
+- **By Source** — who's spending (Claude Code, Claude Desktop, VS Code Extensions, OpenClaw, API providers) with inline cache hit rate
 - **By Model** — table: model, cost, cache%, calls, 1-shot%
 - **Core Tools** — most used Claude tools (Edit, Bash, Read...)
 - **MCP Servers** — external MCP servers and call counts
@@ -174,12 +174,22 @@ litellm.completion(model="groq/llama-3.3-70b", api_base="http://localhost:8082/g
 
 ## How Tracking Works
 
+### Real-time (via proxy)
 1. Client sets provider `BASE_URL` → requests go through the proxy
 2. Proxy forwards to the real upstream, intercepts the response
 3. Anthropic: parses SSE events `message_start/delta/content_block_start`
 4. OpenAI-compat: parses `usage.prompt_tokens/completion_tokens` from JSON or last SSE chunk
 5. Calculates cost via `calc_cost(model, input, output, cache_read, cache_creation)`
 6. Writes to SQLite: source, model, tokens, cost, duration, stop_reason, tools, effort
+
+### From local logs (every 5 minutes)
+A launchd daemon (`com.tokencost.sync`) runs `import_history.py` every 300 seconds to sync local application logs:
+- **Claude Code / Claude CLI** — reads `~/.claude/projects/**/*.jsonl`
+- **Claude Desktop** — reads `~/Library/.../Claude/local-agent-mode-sessions/**/*.jsonl`
+- **OpenClaw** — reads `~/.openclaw/agents/**/*.jsonl`
+- **VS Code Extensions** (Cline, Roo Code, Kilo Code, IBM Bob) — reads `VSCode/workspaceStorage/*/*/tasks/ui_messages.json`
+
+Deduplication is automatic — same request (by `msg_uuid`) is only recorded once, even if seen by both proxy and local sync.
 
 **Sources are identified by User-Agent (55 patterns):**
 
