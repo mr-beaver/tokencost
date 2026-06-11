@@ -277,6 +277,26 @@ tokencost/
 
 ---
 
+## FAQ
+
+### Does switching models break the prompt cache?
+
+No — and this is the most important thing to understand about how the optimizations interact.
+
+Anthropic's prompt caching works at the **model level**: each model maintains its own isolated KV cache for a given prefix. Haiku and Opus have completely different architectures and incompatible internal representations — there is no cross-family KV sharing. When the proxy routes a request from Opus to Haiku, Haiku builds its own cache entry for that prefix. The next Haiku request with the same prefix reads from Haiku's cache at 0.1× input cost.
+
+**The one real cost:** the first request after a model switch pays a cache *write* (1.25× input cost) rather than a cache *read* (0.1× input cost). If you were switching models constantly — every request — that write overhead would accumulate. But the routing logic prevents this:
+
+- `tool_result` turns with no user text → scored 10, never routed. Active tool chains stay on the original model.
+- Any request where the last 4 messages contain `tool_use` or `tool_result` blocks → +2 to score.
+- Complex keywords (`implement`, `refactor`, `debug`, code blocks, file extensions) → score 6–10, original model preserved.
+
+In practice, Haiku handles isolated simple questions ("what is X", short Q&A), while Opus stays on multi-turn coding tasks. Both models warm up their own cache entries and stay on them. The write overhead on the first routing switch is a one-time cost; everything after that is cheap reads.
+
+**Net result:** prompt cache savings + model routing savings compound rather than cancel. Verified in [`optimizer.py`](optimizer.py) — `has_recent_tool_results()` and the tool_result type check in `complexity_score()` are the guards that make this work correctly.
+
+---
+
 ## How much can you save?
 
 Benchmarks below use **Opus 4.8 base pricing** with a typical vibe-coding session mix: 35% simple Q&A (score 0–2 → Haiku), 25% medium refactors (score 3–5 → Sonnet), 40% complex tasks (score 6–10 → Opus). System prompt ~3k tokens reused across the session, 15% duplicate requests filtered.
