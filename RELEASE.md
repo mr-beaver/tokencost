@@ -1,3 +1,15 @@
+# v1.0.5 — Chainable behind another proxy
+
+- **Transparent `/api/oauth/*` passthrough**: TokenCost can now sit chained behind
+  another Anthropic proxy (e.g. headroom) that forwards *all* Anthropic traffic
+  here, not just `/v1/*`. Subscription-usage polls (`/api/oauth/usage`) are proxied
+  through transparently (not logged — they aren't billable LLM calls), so the
+  upstream proxy's subscription tracking keeps working through the chain.
+
+Example chain: `Claude Code -> headroom (compress) -> TokenCost (log cost) -> api.anthropic.com`
+
+---
+
 # v1.0.4 — Windows setup script hardening
 
 - **ASCII-only `onbording.ps1`**: Unicode box-drawing/em-dash characters in the

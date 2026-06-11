@@ -696,6 +696,31 @@ async def proxy_anthropic(path: str, request: Request):
     )
 
 
+# ── Transparent passthrough for Anthropic /api/oauth/* ────────────────────────
+# Not logged — these are subscription-usage polls (e.g. /api/oauth/usage), not
+# billable LLM calls. Needed so TokenCost can sit chained behind another proxy
+# (e.g. headroom) that forwards ALL Anthropic traffic here, not just /v1/*.
+@app.api_route("/api/oauth/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+async def proxy_anthropic_oauth(path: str, request: Request):
+    body_bytes = await request.body()
+    skip = {"host", "content-length", "accept-encoding", "transfer-encoding"}
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in skip}
+    url = f"{ANTHROPIC_URL}/api/oauth/{path}"
+    if request.url.query:
+        url += f"?{request.url.query}"
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.request(
+            method=request.method, url=url, headers=headers, content=body_bytes,
+        )
+    skip_resp = {"content-encoding", "content-length", "transfer-encoding"}
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        headers={k: v for k, v in resp.headers.items() if k.lower() not in skip_resp},
+        media_type=resp.headers.get("content-type"),
+    )
+
+
 # ── OpenAI-compatible proxy (/<provider>/v1/*) ────────────────────────────────
 
 @app.api_route("/{provider}/v1/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
