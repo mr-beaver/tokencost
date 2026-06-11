@@ -69,6 +69,26 @@ def _fetch_latest_version() -> str | None:
     except Exception:
         return _version_cache.get("latest")
 
+def _auto_update_on_startup():
+    """Check and auto-apply git pull if newer version is available on startup."""
+    try:
+        latest = _fetch_latest_version()
+        if latest and latest != _CURRENT_VERSION:
+            print(f"  ⬆️  New version available: {_CURRENT_VERSION} → {latest}")
+            print(f"  🔄 Auto-updating via git pull...")
+            result = subprocess.run(
+                ["git", "-C", _DIR, "pull", "--ff-only"],
+                capture_output=True, timeout=30
+            )
+            if result.returncode == 0:
+                new_ver = _read_local_version()
+                print(f"  ✅ Updated to {new_ver}. Restart the proxy to use new code.")
+            else:
+                err = result.stderr.decode().strip()
+                print(f"  ⚠️  Auto-update failed: {err}")
+    except Exception as e:
+        print(f"  ⚠️  Auto-update error: {e}")
+
 def _bg_version_check():
     _fetch_latest_version()
 
@@ -604,6 +624,8 @@ def _record(source, model, input_tok, output_tok, cr, cw,
 async def lifespan(_: FastAPI):
     init_db()
     weekly_digest()
+    # Auto-update on startup if newer version available
+    threading.Thread(target=_auto_update_on_startup, daemon=True).start()
     print(f"\n🚀  TokenCost Proxy  →  http://localhost:{PROXY_PORT}  (v{_CURRENT_VERSION})")
     print(f"📊  Dashboard  →  http://localhost:{PROXY_PORT}/dashboard")
     providers = ", ".join(PROVIDER_URLS)
