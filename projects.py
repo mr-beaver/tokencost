@@ -12,7 +12,7 @@ import os
 import time
 
 CLAUDE_DIR   = os.path.expanduser("~/.claude/projects")
-HOME_PREFIX  = os.path.expanduser("~") + "/"
+HOME_PREFIX  = os.path.expanduser("~") + os.sep
 CACHE_TTL    = 120   # seconds
 
 PRICING = {
@@ -38,11 +38,10 @@ def _cutoff_ts(period: str) -> str | None:
     from datetime import datetime, timezone, timedelta
     now = datetime.now(timezone.utc)
     if period == "today":
-        # Midnight local time → UTC
-        import time as _t
-        offset = _t.timezone if not _t.daylight else _t.altzone
-        local_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(seconds=offset)
-        return local_midnight.isoformat()
+        # Midnight local time → UTC (DST-safe, cross-platform)
+        local_midnight = datetime.now().astimezone().replace(
+            hour=0, minute=0, second=0, microsecond=0)
+        return local_midnight.astimezone(timezone.utc).isoformat()
     if period == "7d":
         return (now - timedelta(days=7)).isoformat()
     if period == "30d":

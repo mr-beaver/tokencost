@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import sys; sys.stdout.reconfigure(line_buffering=True)
+import sys
+# UTF-8 + line buffering: Windows consoles default to cp1252 and would crash
+# on the box-drawing / emoji characters this proxy logs.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+    except Exception:
+        pass
 """
 TokenCost — proxy for Anthropic + OpenAI-compatible APIs
   ANTHROPIC_BASE_URL=http://localhost:8082          (Claude / Anthropic)
@@ -698,6 +705,31 @@ async def proxy_anthropic(path: str, request: Request):
     )
 
 
+# ── Transparent passthrough for Anthropic /api/oauth/* ────────────────────────
+# Not logged — these are subscription-usage polls (e.g. /api/oauth/usage), not
+# billable LLM calls. Needed so TokenCost can sit chained behind another proxy
+# (e.g. headroom) that forwards ALL Anthropic traffic here, not just /v1/*.
+@app.api_route("/api/oauth/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+async def proxy_anthropic_oauth(path: str, request: Request):
+    body_bytes = await request.body()
+    skip = {"host", "content-length", "accept-encoding", "transfer-encoding"}
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in skip}
+    url = f"{ANTHROPIC_URL}/api/oauth/{path}"
+    if request.url.query:
+        url += f"?{request.url.query}"
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.request(
+            method=request.method, url=url, headers=headers, content=body_bytes,
+        )
+    skip_resp = {"content-encoding", "content-length", "transfer-encoding"}
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        headers={k: v for k, v in resp.headers.items() if k.lower() not in skip_resp},
+        media_type=resp.headers.get("content-type"),
+    )
+
+
 # ── OpenAI-compatible proxy (/<provider>/v1/*) ────────────────────────────────
 
 @app.api_route("/{provider}/v1/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
@@ -782,7 +814,7 @@ def projects(period: str = "7d"):
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard():
     return HTMLResponse(
-        content=open(_DASH).read(),
+        content=open(_DASH, encoding="utf-8").read(),
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
 
@@ -1026,6 +1058,16 @@ def sync_now():
     }
 
 
+def _update_cmd() -> str:
+    if sys.platform == "win32":
+        # Wrapped in `powershell -Command` so it runs whether the user pastes it
+        # into cmd.exe or PowerShell. onbording.ps1 -Update pulls + restarts
+        # non-interactively (no menu prompt).
+        inner = f"Set-Location '{_DIR}'; git pull; & '{_DIR}\\onbording.ps1' -Update"
+        return f'powershell -NoProfile -ExecutionPolicy Bypass -Command "{inner}"'
+    return f"cd {_DIR} && git pull && bash onbording.sh"
+
+
 @app.get("/version")
 def version_info():
     import json as _json
@@ -1033,21 +1075,24 @@ def version_info():
     # prefer file cache written by import_history.py daemon (updated every 24h)
     if os.path.exists(_cache_file):
         try:
-            cached = _json.loads(open(_cache_file).read())
+            cached = _json.loads(open(_cache_file, encoding="utf-8").read())
             # refresh current version in case it changed on disk
             cached["current"] = _CURRENT_VERSION
             cached["up_to_date"] = cached.get("latest") == _CURRENT_VERSION
+            # update_cmd must reflect the current OS, not whatever wrote the cache
+            cached["update_cmd"] = _update_cmd()
             return cached
         except Exception:
             pass
     # fallback: fetch live (happens only before first daemon run)
     latest  = _fetch_latest_version()
     up2date = (latest is None) or (latest == _CURRENT_VERSION)
+    update_cmd = _update_cmd()
     return {
         "current":    _CURRENT_VERSION,
         "latest":     latest,
         "up_to_date": up2date,
-        "update_cmd": f"cd {_DIR} && git pull && bash onbording.sh",
+        "update_cmd": update_cmd,
     }
 
 @app.post("/api/update")

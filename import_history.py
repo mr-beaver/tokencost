@@ -32,6 +32,14 @@ import time
 from pathlib import Path
 from datetime import datetime, timezone
 
+# Windows consoles default to cp1252, which can't encode the box-drawing /
+# emoji characters this script prints. Force UTF-8 on all platforms.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 sys.path.insert(0, str(Path(__file__).parent))
 from db import PRICING as DB_PRICING, init_db as _init_db
 
@@ -40,8 +48,9 @@ HOME     = Path.home()
 _DEFAULT = DB_PRICING["default"]
 
 VSCODE_GLOBS = [
-    str(HOME / "Library/Application Support/Code/User/globalStorage"),
-    str(HOME / ".config/Code/User/globalStorage"),
+    str(HOME / "AppData/Roaming/Code/User/globalStorage"),              # Windows
+    str(HOME / "Library/Application Support/Code/User/globalStorage"),  # macOS
+    str(HOME / ".config/Code/User/globalStorage"),                      # Linux
     str(HOME / ".vscode-server/data/User/globalStorage"),
 ]
 
@@ -504,8 +513,13 @@ def _open_sqlite_ro(path: Path):
 
 def import_copilot(conn):
     """GitHub Copilot: parse log lines for usage tracking (model + time, no token counts)."""
-    log_path = Path(HOME) / "Library/Application Support/Code/logs"
-    if not log_path.exists():
+    log_bases = [
+        Path(HOME) / "AppData/Roaming/Code/logs",              # Windows
+        Path(HOME) / "Library/Application Support/Code/logs",  # macOS
+        Path(HOME) / ".config/Code/logs",                      # Linux
+    ]
+    log_path = next((p for p in log_bases if p.exists()), None)
+    if log_path is None:
         return 0, 0, 0
 
     inserted = errors = 0
@@ -581,7 +595,9 @@ def _backfill_previews_from_jsonl(conn) -> int:
     msg_map: dict[str, dict] = {}
     patterns = [
         str(HOME / ".claude/projects/**/*.jsonl"),
-        str(HOME / "Library/Application Support/Claude/projects/**/*.jsonl"),
+        str(HOME / "AppData/Roaming/Claude/projects/**/*.jsonl"),              # Windows
+        str(HOME / "Library/Application Support/Claude/projects/**/*.jsonl"),  # macOS
+        str(HOME / ".config/Claude/projects/**/*.jsonl"),                      # Linux
     ]
     files: list[str] = []
     for pat in patterns:
@@ -700,14 +716,17 @@ def import_all(verbose: bool = True) -> dict:
     # 1. Claude CLI (with proxy cutoff — proxy captures live traffic)
     ins, skip, err = _import_claude_jsonl(conn, [
         str(HOME / ".claude/projects/*/*.jsonl"),
-        str(HOME / "Library/Application Support/Claude/projects/*/*.jsonl"),
+        str(HOME / "AppData/Roaming/Claude/projects/*/*.jsonl"),              # Windows
+        str(HOME / "Library/Application Support/Claude/projects/*/*.jsonl"),  # macOS
+        str(HOME / ".config/Claude/projects/*/*.jsonl"),                      # Linux
     ], "claude-cli-history", cutoff)
     results["Claude CLI"] = (ins, skip, err)
 
     # 2. Claude Desktop (NO cutoff — proxy never sees Desktop sessions)
     ins, skip, err = _import_claude_jsonl(conn, [
-        str(HOME / "Library/Application Support/Claude/local-agent-mode-sessions/**/*.jsonl"),
-        str(HOME / ".config/Claude/local-agent-mode-sessions/**/*.jsonl"),
+        str(HOME / "AppData/Roaming/Claude/local-agent-mode-sessions/**/*.jsonl"),              # Windows
+        str(HOME / "Library/Application Support/Claude/local-agent-mode-sessions/**/*.jsonl"),  # macOS
+        str(HOME / ".config/Claude/local-agent-mode-sessions/**/*.jsonl"),                      # Linux
     ], "claude-desktop-history", None)
     results["Claude Desktop"] = (ins, skip, err)
 
@@ -775,14 +794,19 @@ def check_version_and_cache():
         req = urllib.request.Request(url, headers={"User-Agent": "tokencost"})
         with urllib.request.urlopen(req, timeout=5) as r:
             latest = r.read().decode().strip()
+        _dir = Path(__file__).parent
+        if sys.platform == "win32":
+            update_cmd = f'cd /d "{_dir}" && git pull && powershell -ExecutionPolicy Bypass -File onbording.ps1'
+        else:
+            update_cmd = f"cd {_dir} && git pull && bash onbording.sh"
         result = {
             "current":    current,
             "latest":     latest,
             "up_to_date": latest == current,
             "checked_at": time.time(),
-            "update_cmd": f"cd {Path(__file__).parent} && git pull && bash onbording.sh",
+            "update_cmd": update_cmd,
         }
-        _VERSION_CACHE.write_text(json.dumps(result))
+        _VERSION_CACHE.write_text(json.dumps(result), encoding="utf-8")
     except Exception:
         pass
 

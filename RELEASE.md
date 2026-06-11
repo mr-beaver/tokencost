@@ -1,16 +1,63 @@
-# v1.0.2 — Complete local log import + full request logging
+# v1.0.6 — Working self-update on Windows
 
-## Fixes
+The dashboard's "Update" command now works on Windows:
 
-- **Import history**: subagent JSONL files (`subagents/*.jsonl`) were not imported — all 101 missing requests now recovered
-- **Streaming dedup**: same `msg_id` appears twice in subagent JSONL (input-first, then output); tokens now accumulated with `max()` per field instead of overwrite
-- **Zero-token skip**: import previously skipped records with `input=0, output=0` even when `cache_read > 0` — fixed to require all four token fields to be zero before skipping
-- **Synthetic records**: `<synthetic>` model entries (internal Claude Code housekeeping) now explicitly skipped during import
-- **Proxy logging**: removed `if input_tok or output_tok or cr` guard in `_record()` — all API responses (including streaming, cache-only, errors) are now written to DB
-- **Browser cache**: `/dashboard` now returns `Cache-Control: no-store` — stale HTML no longer shown after proxy restart
-- **Onboarding sync**: step [4/8] now triggers an immediate sync after registering the daemon, so fresh data is available right after install
+- **Shell-agnostic update command**: the copyable `update_cmd` is wrapped in
+  `powershell -Command`, so it runs whether pasted into **cmd.exe or PowerShell**
+  (the old `cd /d ... && ...` form was cmd-only and broke in PowerShell, the
+  Windows 11 default terminal).
+- **Non-interactive `onbording.ps1 -Update`**: pulls and restarts the proxy with
+  the new code without showing the menu. The full flow (`git pull` -> import ->
+  restart -> dashboard) is verified end-to-end on Windows 11.
+
+---
+
+# v1.0.5 — Chainable behind another proxy
+
+- **Transparent `/api/oauth/*` passthrough**: TokenCost can now sit chained behind
+  another Anthropic proxy (e.g. headroom) that forwards *all* Anthropic traffic
+  here, not just `/v1/*`. Subscription-usage polls (`/api/oauth/usage`) are proxied
+  through transparently (not logged — they aren't billable LLM calls), so the
+  upstream proxy's subscription tracking keeps working through the chain.
+
+Example chain: `Claude Code -> headroom (compress) -> TokenCost (log cost) -> api.anthropic.com`
+
+---
+
+# v1.0.4 — Windows setup script hardening
+
+- **ASCII-only `onbording.ps1`**: Unicode box-drawing/em-dash characters in the
+  script were misread as smart-quote string delimiters when PowerShell read the
+  file without a BOM, breaking parsing. Script is now pure ASCII.
+- **No-admin autostart fallback**: `Register-ScheduledTask` needs elevation; when
+  it's denied, setup now installs a hidden Startup-folder launcher (`TokenCost.vbs`)
+  so the proxy still autostarts at logon without admin
+- **Clean stop**: Disable/restart now kills the full uvicorn supervisor+worker pair
+  (by port *and* command line), leaving no orphaned `proxy.py` process
+
+Verified end-to-end on Windows 11: full Start flow (Python check -> deps -> import
+-> env var -> autostart fallback -> proxy start -> dashboard) runs from the script.
+
+---
+
+# v1.0.3 — Windows support
+
+Full Windows 10/11 port alongside the existing macOS build.
+
+## Added
+
+- **`onbording.ps1`** — PowerShell setup/start/stop script (Windows equivalent of `onbording.sh`): creates the venv, installs deps, imports history, sets `ANTHROPIC_BASE_URL` as a User env var, registers Scheduled Tasks for proxy autostart + 5-min sync, starts the proxy, opens the dashboard
+- **`tokencost.bat`** — double-click launcher for `onbording.ps1`
+- **`requirements.txt`** — pinned dependency list (`fastapi`, `uvicorn`, `httpx`)
+
+## Fixes (cross-platform)
+
+- **UTF-8 console**: `proxy.py` and `import_history.py` now force UTF-8 on stdout/stderr — Windows' default cp1252 console crashed on box-drawing / emoji output
+- **Dashboard read**: `/dashboard` opened `dashboard.html` without an encoding — crashed with `UnicodeDecodeError` on Windows; now reads as UTF-8
+- **Local log paths**: history import now searches Windows locations (`%APPDATA%\Claude`, `%APPDATA%\Code`) in addition to macOS `~/Library/...` and Linux `~/.config/...` for Claude CLI, Claude Desktop, VS Code extensions, and Copilot logs
+- **Update command**: `/version` `update_cmd` and the version-cache writer now emit a PowerShell command on Windows instead of `bash onbording.sh`
+- **Path/timezone**: `projects.py` uses `os.sep` for home-prefix abbreviation and a DST-safe `astimezone()` for the "today" cutoff (replaces the fragile `time.timezone` math)
 
 ## Result
 
-Local JSONL logs → DB coverage: **100%** (was ~0% for subagent requests)
-Proxy request capture: **100%** (was ~72%)
+Proxy, dashboard, history import, and live sync all verified working on Windows 11 (Python 3.14).
