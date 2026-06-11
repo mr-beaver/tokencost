@@ -271,6 +271,8 @@ Read from `.smart_routing` file — **no proxy restart needed** when toggling.
 | 3–5   | Sonnet        | stays Sonnet | — |
 | 6–10  | any           | stays original | — |
 
+**Note on prompt caching:** When a model is downrouted, the prompt cache is re-keyed to the target model, not the original. This means you lose potential cache reuse on the original model. However, for the simple requests that get downrouted (score ≤2), this cache tradeoff is negligible compared to the 5–25× cost savings. Complex requests that would benefit from cache reuse (score 6–10) are never downrouted.
+
 ### How Score Is Calculated (0–10)
 
 The proxy only looks at the **last user message** (not the full context).  
