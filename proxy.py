@@ -1051,7 +1051,11 @@ def sync_now():
 
 def _update_cmd() -> str:
     if sys.platform == "win32":
-        return f'cd /d "{_DIR}" && git pull && powershell -ExecutionPolicy Bypass -File onbording.ps1'
+        # Wrapped in `powershell -Command` so it runs whether the user pastes it
+        # into cmd.exe or PowerShell. onbording.ps1 -Update pulls + restarts
+        # non-interactively (no menu prompt).
+        inner = f"Set-Location '{_DIR}'; git pull; & '{_DIR}\\onbording.ps1' -Update"
+        return f'powershell -NoProfile -ExecutionPolicy Bypass -Command "{inner}"'
     return f"cd {_DIR} && git pull && bash onbording.sh"
 
 

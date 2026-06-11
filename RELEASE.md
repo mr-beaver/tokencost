@@ -1,3 +1,17 @@
+# v1.0.6 — Working self-update on Windows
+
+The dashboard's "Update" command now works on Windows:
+
+- **Shell-agnostic update command**: the copyable `update_cmd` is wrapped in
+  `powershell -Command`, so it runs whether pasted into **cmd.exe or PowerShell**
+  (the old `cd /d ... && ...` form was cmd-only and broke in PowerShell, the
+  Windows 11 default terminal).
+- **Non-interactive `onbording.ps1 -Update`**: pulls and restarts the proxy with
+  the new code without showing the menu. The full flow (`git pull` -> import ->
+  restart -> dashboard) is verified end-to-end on Windows 11.
+
+---
+
 # v1.0.5 — Chainable behind another proxy
 
 - **Transparent `/api/oauth/*` passthrough**: TokenCost can now sit chained behind

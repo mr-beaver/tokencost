@@ -16,7 +16,12 @@
     4. Registers a scheduled task (or a Startup-folder launcher if not elevated)
        so the proxy autostarts at logon, plus a 5-minute log-sync task
     5. Starts the proxy in the background and opens the dashboard
+
+  Run with -Update for a non-interactive pull-and-restart (used by the
+  dashboard's "Update" command); otherwise it shows the interactive menu.
 #>
+
+param([switch]$Update)
 
 $ErrorActionPreference = 'Stop'
 $PORT       = 8082
@@ -253,6 +258,30 @@ function Action-Disable {
     Write-Host "  (Restart open apps to drop the proxy setting.)"
     Write-Host ""
 }
+
+# --- Action: Update (non-interactive: re-import + restart with new code) -------
+function Action-Update {
+    Write-Host ""
+    Write-Host "  TokenCost - Update" -ForegroundColor White
+    Write-Host ""
+    if (-not (Test-Path $VenvPy)) { Write-Warn2 "venv missing - run setup first (tokencost.bat)"; return }
+    Write-Step "1/2" "Importing latest history..."
+    & $VenvPy (Join-Path $ScriptDir "import_history.py") --silent 2>&1 | Out-Null
+    Write-Ok "History imported"
+    Write-Step "2/2" "Restarting proxy with updated code..."
+    Stop-Proxy
+    Start-ProxyBackground
+    $ready = $false
+    foreach ($i in 1..15) { Start-Sleep -Seconds 1; if (Test-ProxyRunning) { $ready = $true; break } }
+    if ($ready) { Write-Ok "Proxy restarted on $BaseUrl" }
+    else { Write-Warn2 "Proxy did not report ready - check proxy-error.log" }
+    Write-Host ""
+    Write-Host "  Update complete. Dashboard: $BaseUrl/dashboard" -ForegroundColor Green
+    Write-Host ""
+}
+
+# Non-interactive update path (invoked by the dashboard's update command)
+if ($Update) { Action-Update; exit 0 }
 
 # --- Menu ----------------------------------------------------------------------
 Clear-Host
