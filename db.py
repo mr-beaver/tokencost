@@ -1093,14 +1093,15 @@ def _effort_breakdown(period):
                ROUND(SUM(cost_usd), 4)      as cost,
                ROUND(AVG(cost_usd), 5)      as avg_cost,
                SUM(output_tokens)           as total_out,
-               ROUND(AVG(output_tokens))    as avg_out
+               ROUND(AVG(output_tokens))    as avg_out,
+               ROUND(AVG(input_tokens))     as avg_inp
         FROM requests WHERE 1=1 {clause}
         GROUP BY model, effort
         ORDER BY cost DESC
     """).fetchall()
     con.close()
     return [{"model": r[0], "effort": r[1], "reqs": r[2], "cost": r[3],
-             "avg_cost": r[4], "total_out": r[5], "avg_out": r[6]} for r in rows]
+             "avg_cost": r[4], "total_out": r[5], "avg_out": r[6], "avg_inp": r[7]} for r in rows]
 
 
 def _recommendations(summary, haiku_savings, by_model=None, period="7d"):
@@ -1470,6 +1471,9 @@ def get_stats(period="7d"):
         total_toks = (m.get("inp") or 0) + (m.get("cache_read") or 0) + (m.get("cache_creation") or 0)
         m["cache_hit_rate"] = round((m.get("cache_read") or 0) / total_toks * 100, 1) if total_toks else 0
         m["one_shot_pct"]   = round((m.get("one_shots") or 0) / m["reqs"] * 100) if m.get("reqs") else None
+        reqs = m.get("reqs") or 1
+        m["avg_inp"] = round((m.get("inp") or 0) / reqs)
+        m["avg_out"] = round((m.get("out") or 0) / reqs)
 
     top_requests = [dict(r) for r in con.execute(f"""
         SELECT ts, source, model, input_tokens, output_tokens, cache_read_tokens,

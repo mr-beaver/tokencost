@@ -589,7 +589,7 @@ tr.rl-highlight td{background:#fef9c3!important}
       <div class="card-title">By Model — cost · cache · 1-shot rate</div>
       <div class="table-wrap"><table id="by-model-table">
         <thead><tr>
-          <th>Model</th><th>Cost</th><th>Cost/Call</th><th>Cache</th><th>Calls</th><th>1-shot</th>
+          <th>Model</th><th>Cost</th><th>Cost/Call</th><th>Cache</th><th>Calls</th><th>1-shot</th><th title="Average input tokens per request">Avg In tok</th><th title="Average output tokens per request">Avg Out tok</th>
         </tr></thead>
         <tbody id="by-model-tbody"></tbody>
       </table></div>
@@ -655,7 +655,7 @@ tr.rl-highlight td{background:#fef9c3!important}
       <table>
         <thead><tr>
           <th>Model</th><th>Effort</th><th>Requests</th>
-          <th>Total $</th><th>Avg $/req</th><th>Avg output tok</th>
+          <th>Total $</th><th>Avg $/req</th><th title="Average input tokens per request">Avg In tok</th><th title="Average output tokens per request">Avg Out tok</th>
         </tr></thead>
         <tbody id="effort-tbody"></tbody>
       </table>
@@ -731,8 +731,8 @@ style="display:contents"></div>
       <th style="min-width:80px">Efficiency</th>
       <th style="min-width:80px">Source</th>
       <th style="min-width:50px;text-align:right">Reqs</th>
-      <th style="min-width:90px;text-align:right">Input</th>
-      <th style="min-width:90px;text-align:right">Output</th>
+      <th style="min-width:90px;text-align:right" title="Total input tokens · cost below">Input tok</th>
+      <th style="min-width:90px;text-align:right" title="Total output tokens · cost below">Output tok</th>
       <th style="min-width:140px">Top Tools</th>
       <th style="min-width:80px;text-align:right">Total $</th>
     </tr></thead>
@@ -752,16 +752,16 @@ style="display:contents"></div>
 
 <div class="card" style="margin-bottom:14px">
   <div class="card-title">Recent 20 Requests</div>
-  <div style="font-family:var(--mono);font-size:10px;color:var(--muted);margin-bottom:8px;letter-spacing:.5px">Live — last 20 API calls captured by proxy · scroll horizontally if needed</div>
+  <div style="font-family:var(--mono);font-size:10px;color:var(--muted);margin-bottom:8px;letter-spacing:.5px">Live — last 20 API calls captured by proxy · scroll horizontally if needed · <b>In tok</b> = new input tokens · <b>Cache↑ tok</b> = cache-read tokens (billed at 10% of input price) · <b>Out tok</b> = output tokens</div>
   <div class="table-wrap">
     <table style="min-width:860px">
       <thead><tr>
         <th style="min-width:110px">Time</th>
         <th style="min-width:90px">Source</th>
         <th style="min-width:120px">Model</th>
-        <th style="min-width:70px;text-align:right">In</th>
-        <th style="min-width:90px;text-align:right">Cache↑</th>
-        <th style="min-width:70px;text-align:right">Out</th>
+        <th style="min-width:70px;text-align:right" title="Input tokens (non-cached)">In tok</th>
+        <th style="min-width:90px;text-align:right" title="Cache read tokens — billed at 10% of input price">Cache↑ tok</th>
+        <th style="min-width:70px;text-align:right" title="Output tokens">Out tok</th>
         <th style="min-width:55px;text-align:right">Tools</th>
         <th style="min-width:60px">Stop</th>
         <th style="min-width:80px;text-align:right">Cost $</th>
@@ -778,16 +778,16 @@ style="display:contents"></div>
 
 <div class="card" style="margin-bottom:14px">
   <div class="card-title">Top 10 Most Expensive Requests</div>
-  <div style="font-family:var(--mono);font-size:10px;color:var(--muted);margin-bottom:8px;letter-spacing:.5px">Highest cost single API calls across all time</div>
+  <div style="font-family:var(--mono);font-size:10px;color:var(--muted);margin-bottom:8px;letter-spacing:.5px">Highest cost single API calls across all time · <b>In tok</b> = new input · <b>Cache↑ tok</b> = cache-read (10% price) · <b>Out tok</b> = output · high cost often driven by large cache_creation (first write)</div>
   <div class="table-wrap">
     <table style="min-width:820px">
       <thead><tr>
         <th style="min-width:110px">Time</th>
         <th style="min-width:90px">Source</th>
         <th style="min-width:120px">Model</th>
-        <th style="min-width:70px;text-align:right">In</th>
-        <th style="min-width:90px;text-align:right">Cache↑</th>
-        <th style="min-width:70px;text-align:right">Out</th>
+        <th style="min-width:70px;text-align:right" title="Input tokens (non-cached)">In tok</th>
+        <th style="min-width:90px;text-align:right" title="Cache read tokens — billed at 10% of input price">Cache↑ tok</th>
+        <th style="min-width:70px;text-align:right" title="Output tokens">Out tok</th>
         <th style="min-width:55px;text-align:right">Tools</th>
         <th style="min-width:60px">Stop</th>
         <th style="min-width:80px;text-align:right">Cost $</th>
@@ -921,9 +921,9 @@ style="display:contents"></div>
           <th style="min-width:130px">Time</th>
           <th style="min-width:90px">Source</th>
           <th style="min-width:130px">Model</th>
-          <th style="min-width:65px;text-align:right">In</th>
-          <th style="min-width:65px;text-align:right">Cache↑</th>
-          <th style="min-width:65px;text-align:right">Out</th>
+          <th style="min-width:65px;text-align:right" title="Input tokens (non-cached)">In tok</th>
+          <th style="min-width:65px;text-align:right" title="Cache read tokens — billed at 10% of input price">Cache↑ tok</th>
+          <th style="min-width:65px;text-align:right" title="Output tokens">Out tok</th>
           <th style="min-width:45px;text-align:right">Tools</th>
           <th style="min-width:95px">Activity</th>
           <th style="min-width:55px">Stop</th>
@@ -942,6 +942,7 @@ style="display:contents"></div>
 <script>
 // ── Helpers ──────────────────────────────────────────────────────────────────
 const fmt     = n  => n == null ? '—' : Number(n).toLocaleString();
+const fmtTokShort = n => !n ? '—' : n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1000 ? Math.round(n/1000)+'k' : String(Math.round(n));
 const fmtCost = c  => c == null || c === 0 ? '—' : '$' + Number(c).toFixed(4);
 const fmtCost2= c  => c == null ? '—' : '$' + Number(c).toFixed(2);
 const fmtCost5= c  => c == null ? '—' : '$' + Number(c).toFixed(5);
@@ -1665,6 +1666,8 @@ async function refresh() {
             ? `<span style="color:${x.one_shot_pct>=70?'var(--good)':x.one_shot_pct>=40?'var(--accent2)':'var(--muted)'}">${x.one_shot_pct}%</span>`
             : '—';
           const costPerCall = x.reqs > 0 && x.cost > 0 ? fmtCost(x.cost / x.reqs) : '—';
+          const avgInFmt  = x.avg_inp  ? fmtTokShort(x.avg_inp)  : '—';
+          const avgOutFmt = x.avg_out ? fmtTokShort(x.avg_out) : '—';
           return `<tr>
             <td style="font-family:var(--mono);font-size:12px">${shortName}</td>
             <td class="c-ok">${fmtCost(x.cost)}</td>
@@ -1672,9 +1675,11 @@ async function refresh() {
             <td style="color:${cacheClr};font-family:var(--mono);font-size:12px">${x.cache_hit_rate != null ? x.cache_hit_rate + '%' : '—'}</td>
             <td class="c-muted">${fmt(x.reqs)}</td>
             <td>${oneShotCell}</td>
+            <td class="c-muted" style="font-family:var(--mono);font-size:11px" title="${fmt(x.avg_inp)} tokens">${avgInFmt}</td>
+            <td class="c-muted" style="font-family:var(--mono);font-size:11px" title="${fmt(x.avg_out)} tokens">${avgOutFmt}</td>
           </tr>`;
         }).join('')
-      : `<tr><td colspan="6" class="empty">No data</td></tr>`;
+      : `<tr><td colspan="8" class="empty">No data</td></tr>`;
   }
 
   // ── Tool breakdown split (Core Tools + MCP Servers)
@@ -1745,12 +1750,14 @@ async function refresh() {
         <td>${r.reqs}</td>
         <td style="font-family:var(--mono);color:var(--warn)">$${Number(r.cost).toFixed(4)}</td>
         <td style="font-family:var(--mono);color:var(--muted)">$${Number(r.avg_cost).toFixed(5)}</td>
-        <td style="font-family:var(--mono);color:var(--muted)">${Math.round(r.avg_out||0)}</td>
+        <td style="font-family:var(--mono);color:var(--muted)" title="${fmt(r.avg_inp)} tokens avg input">${fmtTokShort(r.avg_inp||0)}</td>
+        <td style="font-family:var(--mono);color:var(--muted)" title="${fmt(r.avg_out)} tokens avg output">${fmtTokShort(r.avg_out||0)}</td>
       </tr>`).join('') + `
       <tr class="tfoot-total">
         <td colspan="2">TOTAL</td>
         <td>${efTot.reqs}</td>
         <td style="font-family:var(--mono);color:var(--warn)">$${efTot.cost.toFixed(4)}</td>
+        <td>—</td>
         <td>—</td>
         <td>—</td>
       </tr>`;

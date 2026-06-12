@@ -617,7 +617,7 @@ struct MenuBarView: View {
 
     private var modelsView: some View {
         VStack(spacing: 0) {
-            ColHeader(c1: "Cost", c2: "Cache", c3: "1-shot")
+            ColHeader(c1: "Cost", c2: "Cache%", c3: "1-shot")
             let top = Array(model.byModel.prefix(7))
             if top.isEmpty {
                 Text("No model data").font(monoSm).foregroundColor(.secondary).padding(.vertical, 16)
@@ -846,13 +846,13 @@ struct MenuBarView: View {
                     // Tokens row
                     HStack(spacing: 0) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("AVG INPUT").font(.system(size: 9, weight: .bold, design: .monospaced)).foregroundColor(.secondary)
+                            Text("AVG IN TOK").font(.system(size: 9, weight: .bold, design: .monospaced)).foregroundColor(.secondary)
                             Text(fmtTokens(model.routingAvgIn))
                                 .font(.system(size: 15, weight: .bold, design: .monospaced)).foregroundColor(.primary)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("AVG OUTPUT").font(.system(size: 9, weight: .bold, design: .monospaced)).foregroundColor(.secondary)
+                            Text("AVG OUT TOK").font(.system(size: 9, weight: .bold, design: .monospaced)).foregroundColor(.secondary)
                             Text(fmtTokens(model.routingAvgOut))
                                 .font(.system(size: 15, weight: .bold, design: .monospaced)).foregroundColor(.primary)
                         }
