@@ -478,6 +478,15 @@ action_disable() {
   fi
 
   unset ANTHROPIC_BASE_URL
+
+  if pgrep -x "TokenCostBar" &>/dev/null; then
+    echo -e "  ${CYAN}→${NC} Closing menubar app..."
+    pkill -x "TokenCostBar" 2>/dev/null
+    echo -e "  ${GREEN}✓${NC} Menubar app closed"
+  else
+    echo -e "  ${DIM}  Menubar app was not running${NC}"
+  fi
+
   echo ""
   echo -e "  ${GREEN}Done. TokenCost fully disabled.${NC}"
   echo -e "  ${DIM}  Claude CLI and VS Code now connect directly to Anthropic.${NC}"
