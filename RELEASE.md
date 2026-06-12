@@ -1,3 +1,15 @@
+# v1.0.8 — Dashboard clarity: avg tokens, cache write visibility, smart routing count
+
+- **Avg In/Out tokens**: all dashboard tables now show average input and output tokens per request, making cost driver analysis clearer
+- **Cache Write (CW tok) column**: added to Recent 20, Top 10, Sessions, and Raw Logs tables — shows cache_creation_tokens (billed at 125% of input price). Previously hidden, this is often the largest cost component
+- **Smart Routing Count column**: explicit column in Optimizer tab replaces confusing "30+" suffix on model names — routing event counts are now clearly labeled
+- **Model×Effort table**: now displays Avg In tok and Avg Out tok for each model+effort combination
+- **FAQ section**: added explanation of how model switching interacts with prompt caching — clarifies that each model has its own isolated KV cache (no cross-model reuse) and why savings still compound
+- **Fix**: removed auto_enable_thinking which was causing $15–43/day in runaway loops on tool errors — Claude now only uses extended thinking when explicitly requested
+- **Menubar app**: labeled "AVG INPUT" and "AVG OUTPUT" as tokens (AVG IN TOK / AVG OUT TOK) for clarity; Models tab shows "Cache%" instead of "Cache"
+
+---
+
 # v1.0.7 — Claude Fable 5 & Opus 4.8 support + routing dashboard
 
 - **New models**: Fable 5 ($10/$50M) and Opus 4.8 ($5/$25M) added to pricing and smart routing
