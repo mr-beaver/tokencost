@@ -40,6 +40,13 @@ stop_proxy() {
 }
 
 remove_from_zshrc() {
+  # Remove proxy URL and section comment — but keep the alias so `tokencost` still works
+  sed -i '' '/# TokenCost/d' "$ZSHRC" 2>/dev/null
+  sed -i '' '/ANTHROPIC_BASE_URL/d' "$ZSHRC" 2>/dev/null
+}
+
+remove_alias_from_zshrc() {
+  # Full removal including alias (used only when uninstalling completely)
   sed -i '' '/# TokenCost/d' "$ZSHRC" 2>/dev/null
   sed -i '' '/ANTHROPIC_BASE_URL/d' "$ZSHRC" 2>/dev/null
   sed -i '' '/alias tokencost=/d' "$ZSHRC" 2>/dev/null
@@ -479,6 +486,12 @@ action_disable() {
 
   unset ANTHROPIC_BASE_URL
 
+  # Ensure the `tokencost` alias survives disable so the user can re-enable later
+  if ! grep -q "alias tokencost=" "$ZSHRC" 2>/dev/null; then
+    echo "alias tokencost='bash $SCRIPT_DIR/onbording.sh'" >> "$ZSHRC"
+    echo -e "  ${DIM}  (kept alias tokencost in ~/.zshrc)${NC}"
+  fi
+
   if pgrep -x "TokenCostBar" &>/dev/null; then
     echo -e "  ${CYAN}→${NC} Closing menubar app..."
     pkill -x "TokenCostBar" 2>/dev/null
@@ -488,8 +501,9 @@ action_disable() {
   fi
 
   echo ""
-  echo -e "  ${GREEN}Done. TokenCost fully disabled.${NC}"
-  echo -e "  ${DIM}  Claude CLI and VS Code now connect directly to Anthropic.${NC}"
+  echo -e "  ${GREEN}Done. TokenCost proxy disabled.${NC}"
+  echo -e "  ${DIM}  Open a new terminal — old tabs may still have ANTHROPIC_BASE_URL set.${NC}"
+  echo -e "  ${DIM}  Run ${BOLD}tokencost${NC}${DIM} anytime to re-enable.${NC}"
   echo ""
   echo -ne "  Press Enter..."
   read -r

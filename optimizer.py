@@ -8,9 +8,10 @@ Request-level cost optimizations:
 import hashlib
 import json
 
-# ── Request deduplication cache (5 sec window) ──────────────────────────────────
+# ── Request deduplication cache ────────────────────────────────────────────────
 _dedup_cache: dict = {}  # hash → (response, timestamp)
-_DEDUP_TTL_SEC = 5
+_DEDUP_TTL_SEC = 5        # default: 5s for normal requests
+_DEDUP_TTL_TOOL_SEC = 15  # extended: 15s for tool_result requests (content stable within a tool chain)
 
 # ── Tool result cache (per-session, cleared on new session) ────────────────────
 _tool_result_cache: dict = {}  # (tool_name, tool_input_hash) → (result_text, timestamp)
@@ -20,16 +21,141 @@ _TOOL_CACHE_TTL_SEC = 300  # 5 minutes within a session
 _last_message_count: int = 0
 _message_count_threshold: int = 40  # force trim if exceeds this
 
+# ── Session-aware cache tracking — prevents routing from busting prompt cache ──
+#
+# Problem: routing switches model mid-session (sonnet→haiku→sonnet).
+# Each model switch invalidates Anthropic's prompt cache (cache is per-model).
+# The 80k-token Claude Code system prompt costs ~$0.30 per cache-write, so a
+# model switch can cost MORE than the routing saves.
+#
+# Fix: only allow routing on the first request of a session, or after the cache
+# has expired (>5 min gap). Within an active session we preserve the model.
+#
+# Session key = SHA256 of the first 500 chars of the system prompt.
+# This is stable within one Claude Code session, changes on /compact or new project.
+#
+# Per session we track:
+#   model      — which model the cache was written for
+#   last_ts    — timestamp of last request (to detect >5 min gaps)
+#   cache_warm — True once we've seen cache_creation_tokens > 0 (exact signal)
+#
+# _routing_skipped_cache — counter for dashboard
+
+_CACHE_TTL_SEC = 300  # 5 min = Anthropic prompt cache TTL
+
+_session_state: dict = {}   # session_key → {model, last_ts, cache_warm}
+_routing_skipped_cache: int = 0
+
+
+def _session_key(body_bytes: bytes) -> str | None:
+    """Derive a stable session key from the system prompt prefix."""
+    try:
+        body = json.loads(body_bytes)
+        system = body.get("system", "")
+        if isinstance(system, list):
+            # system is array of content blocks
+            text = " ".join(b.get("text", "") for b in system if isinstance(b, dict))
+        else:
+            text = system or ""
+        if not text:
+            return None
+        return hashlib.sha256(text[:500].encode()).hexdigest()[:16]
+    except Exception:
+        return None
+
+
+def record_cache_state(model: str, now: float,
+                       body_bytes: bytes = b"", cache_write_tokens: int = 0):
+    """Called after each response to update per-session cache state."""
+    if not model or model == "unknown":
+        return
+    key = _session_key(body_bytes) if body_bytes else None
+    if not key:
+        return
+    prev = _session_state.get(key, {})
+    _session_state[key] = {
+        "model":      model,
+        "last_ts":    now,
+        # cache_warm: set when write seen; kept True; reset only on gap > TTL
+        "cache_warm": prev.get("cache_warm", False) or (cache_write_tokens > 0),
+    }
+
+
+def routing_skipped_count() -> int:
+    return _routing_skipped_cache
+
+
+def should_skip_routing(requested_model: str, target_model: str,
+                        now: float, body_bytes: bytes) -> bool:
+    """
+    Returns True if routing should be skipped to preserve the prompt cache.
+
+    Routing is ALLOWED only when:
+      1. No session state exists yet (first request — cache not written)
+      2. Cache TTL has expired (> 5 min since last request to this session)
+
+    Routing is BLOCKED when:
+      - Session is active (< 5 min gap) AND cache is warm for the current model
+      - Switching model would bust a cache that costs ~$0.30 to rebuild
+    """
+    global _routing_skipped_cache
+
+    if requested_model == target_model:
+        return False  # no switch, nothing to skip
+
+    key = _session_key(body_bytes)
+    if not key:
+        return False  # can't derive session → allow routing (safe default)
+
+    state = _session_state.get(key)
+    if not state:
+        return False  # first request for this session → allow routing
+
+    gap = now - state.get("last_ts", 0)
+    if gap > _CACHE_TTL_SEC:
+        return False  # cache expired → allow routing
+
+    # Session is active. Block routing if cache was written for a different model
+    # (switching model now would bust the cache and force a re-write).
+    if state.get("cache_warm") and state.get("model") != target_model:
+        _routing_skipped_cache += 1
+        return True
+
+    return False
+
+
+def _is_tool_result_request(body_bytes: bytes) -> bool:
+    """Returns True if the last user message consists only of tool_result blocks (no free text)."""
+    try:
+        body = json.loads(body_bytes)
+        messages = body.get("messages", [])
+        for msg in reversed(messages):
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content", [])
+            if not isinstance(content, list):
+                return False
+            return all(
+                isinstance(b, dict) and b.get("type") == "tool_result"
+                for b in content
+            )
+    except Exception:
+        pass
+    return False
+
 
 def dedup_check(body_bytes: bytes, now: float) -> tuple:
     """
-    Check if identical request was processed <5s ago.
+    Check if identical request was processed recently.
+    Tool_result requests (mid tool-chain) use a 15s window since their content
+    is stable within a single tool chain. Other requests use 5s.
     Returns (cached_response, req_hash) if found, else (None, req_hash).
     """
     req_hash = hashlib.sha256(body_bytes).hexdigest()
+    ttl = _DEDUP_TTL_TOOL_SEC if _is_tool_result_request(body_bytes) else _DEDUP_TTL_SEC
     if req_hash in _dedup_cache:
         cached_resp, cached_ts = _dedup_cache[req_hash]
-        if now - cached_ts < _DEDUP_TTL_SEC:
+        if now - cached_ts < ttl:
             return cached_resp, req_hash
         else:
             del _dedup_cache[req_hash]
@@ -269,8 +395,9 @@ def _has_tool_errors(messages: list) -> bool:
 
 def auto_enable_thinking(body_data: dict) -> tuple:
     """
-    Auto-enable extended thinking when tool chain has errors.
+    Auto-enable adaptive thinking when tool chain has errors.
     Only activates if thinking is not already set.
+    Uses adaptive thinking + effort (budget_tokens is deprecated on Opus 4.7+).
     Returns (modified_body_data, opt_tag_or_None).
     """
     # Skip if thinking already set by client
@@ -283,32 +410,40 @@ def auto_enable_thinking(body_data: dict) -> tuple:
 
     if _has_tool_errors(messages):
         complexity = complexity_score(body_data)
-        budget = 5000 if complexity >= 5 else 3000
-        body_data["thinking"] = {"type": "enabled", "budget_tokens": budget}
-        return body_data, ("think ", f"auto-enabled thinking (tool errors detected, budget={budget}, complexity={complexity})")
+        effort = "high" if complexity >= 5 else "medium"
+        body_data["thinking"] = {"type": "adaptive"}
+        body_data.setdefault("output_config", {})["effort"] = effort
+        return body_data, ("think ", f"auto-enabled adaptive thinking (tool errors, effort={effort}, complexity={complexity})")
 
     return body_data, None
 
 
 def limit_thinking_budget(body_data: dict) -> tuple:
-	"""
-	Auto-limit budget_tokens for thinking mode based on complexity.
-	Returns (modified_body_data, optimization_tag_if_applied).
-	"""
-	thinking = body_data.get("thinking")
-	if not thinking:
-		return body_data, None
+    """
+    Adjust effort level for thinking mode based on complexity.
+    budget_tokens is deprecated on Opus 4.7+ — use effort instead.
+    Strips budget_tokens if present (causes 400 on modern models).
+    Returns (modified_body_data, optimization_tag_if_applied).
+    """
+    thinking = body_data.get("thinking")
+    if not thinking or not isinstance(thinking, dict):
+        return body_data, None
 
-	if isinstance(thinking, dict) and "budget_tokens" not in thinking:
-		complexity = complexity_score(body_data)
-		if complexity < 4:
-			thinking["budget_tokens"] = 2000
-			return body_data, ("thinking", f"limited budget to 2k tokens (complexity {complexity})")
-		elif complexity < 7:
-			thinking["budget_tokens"] = 5000
-			return body_data, ("thinking", f"limited budget to 5k tokens (complexity {complexity})")
+    # Strip deprecated budget_tokens — causes 400 on Opus 4.7+
+    if "budget_tokens" in thinking:
+        thinking.pop("budget_tokens")
 
-	return body_data, None
+    # If adaptive thinking is set but no effort, tune by complexity
+    if thinking.get("type") == "adaptive" and "output_config" not in body_data:
+        complexity = complexity_score(body_data)
+        if complexity < 4:
+            body_data.setdefault("output_config", {})["effort"] = "medium"
+            return body_data, ("thinking", f"set effort=medium for adaptive thinking (complexity {complexity})")
+        elif complexity < 7:
+            body_data.setdefault("output_config", {})["effort"] = "high"
+            return body_data, ("thinking", f"set effort=high for adaptive thinking (complexity {complexity})")
+
+    return body_data, None
 
 
 def optimize_request(body_data: dict) -> tuple:

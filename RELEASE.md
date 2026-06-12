@@ -1,3 +1,17 @@
+# v1.0.9 — Cache-aware smart routing + optimizer improvements
+
+- **Cache-aware routing**: Smart Routing now detects active prompt cache sessions and skips model switching when the cache is warm. Each model switch previously invalidated Anthropic's per-model KV cache (~$0.30 rebuild cost for 80k-token system prompts). Routing is now only allowed on the first request of a session or after the 5-minute cache TTL expires
+- **Session tracking**: proxy tracks session state via SHA256 of the system prompt prefix — stable within a Claude Code session, resets on `/compact` or new project
+- **`routing_skipped_for_cache` counter**: `/optimizer-status` now reports how many routing decisions were blocked to preserve cache — visible in dashboard
+- **Fixed deprecated thinking API**: `auto_enable_thinking` and `limit_thinking_budget` now use `thinking: {type: "adaptive"}` + `output_config.effort` instead of `budget_tokens` (which caused 400 errors on Opus 4.7+ and runaway $15–43/day loops)
+- **Extended dedup window for tool chains**: tool_result requests (mid tool-chain) use 15s dedup window instead of 5s — content is stable within a single tool chain
+- **effort:low for simple requests**: requests routed to Haiku (score 0–2) now get `output_config.effort=low` to further reduce output tokens
+- **Optimizer status banner**: `/dashboard#optimizer` now shows a status banner at the top — green when Smart Routing is enabled, grey with enable instructions when disabled
+- **Fix: disable proxy keeps `tokencost` alias**: `onbording.sh` disable action no longer removes the `tokencost` alias from `~/.zshrc` — the command stays available to re-enable later
+- **Routing table fix**: Smart Routing table now uses DB-aggregated `routing_groups` (full history, all periods) instead of `recent_events` (capped at 100) — COUNT, IN TOK AVG, OUT TOK AVG, EFFORT columns now show real data
+
+---
+
 # v1.0.8 — Dashboard clarity: avg tokens, cache write visibility, smart routing count
 
 - **Avg In/Out tokens**: all dashboard tables now show average input and output tokens per request, making cost driver analysis clearer

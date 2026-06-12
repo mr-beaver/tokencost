@@ -417,13 +417,34 @@ def get_optimizer_stats(period="7d"):
     clause = _period_clause(period)
     con = sqlite3.connect(DB_PATH)
 
-    # Get all requests with optimizations
+    # Get all requests with optimizations (include token/effort data for routing table)
     rows = con.execute(
-        f"""SELECT id, ts, source, model, optimizations_json, optimizer_savings_usd
+        f"""SELECT id, ts, source, model, optimizations_json, optimizer_savings_usd,
+                   input_tokens, output_tokens, effort
            FROM requests
            WHERE optimizations_json IS NOT NULL AND optimizer_savings_usd > 0.0001 {clause}
            ORDER BY ts DESC
            LIMIT 500"""
+    ).fetchall()
+
+    # Routing groups: aggregate directly from DB for full accuracy (not limited to 100 events)
+    routing_rows = con.execute(
+        f"""SELECT
+               json_extract(opt.value, '$.from') AS from_model,
+               json_extract(opt.value, '$.to')   AS to_model,
+               COUNT(*)                           AS cnt,
+               SUM(json_extract(opt.value, '$.saved_usd')) AS saved,
+               MAX(r.ts)                          AS ts_last,
+               AVG(r.input_tokens)                AS avg_in,
+               AVG(r.output_tokens)               AS avg_out,
+               r.effort
+           FROM requests r,
+                json_each(r.optimizations_json) AS opt
+           WHERE json_extract(opt.value, '$.type') = 'routing'
+             AND r.optimizations_json IS NOT NULL
+             {clause}
+           GROUP BY from_model, to_model, r.effort
+           ORDER BY saved DESC"""
     ).fetchall()
 
     # Get total actual cost (all requests in period, not just optimized ones)
@@ -455,7 +476,7 @@ def get_optimizer_stats(period="7d"):
     recent_events = []
 
     for row in rows:
-        rid, ts_str, source, model, opt_json_str, saved = row
+        rid, ts_str, source, model, opt_json_str, saved, inp_tok, out_tok, eff = row
         total_saved += saved or 0
 
         # Parse optimizations
@@ -486,6 +507,9 @@ def get_optimizer_stats(period="7d"):
                 "model": model,
                 "type": opt.get("type"),
                 "saved_usd": opt.get("saved_usd", 0),
+                "input_tokens": inp_tok,
+                "output_tokens": out_tok,
+                "effort": eff,
                 "details": {k: v for k, v in opt.items() if k not in ("type", "saved_usd")}
             })
 
@@ -507,6 +531,21 @@ def get_optimizer_stats(period="7d"):
     else:
         roi = 0
 
+    # Build routing_groups from DB aggregates
+    routing_groups = []
+    for rr in routing_rows:
+        from_m, to_m, cnt, saved_sum, ts_last, avg_in, avg_out, eff = rr
+        routing_groups.append({
+            "from": from_m or "?",
+            "to":   to_m   or "?",
+            "count":    cnt,
+            "saved":    round(saved_sum or 0, 4),
+            "ts_last":  ts_last,
+            "avg_input_tokens":  round(avg_in  or 0),
+            "avg_output_tokens": round(avg_out or 0),
+            "effort": eff or "standard",
+        })
+
     return {
         "total_saved": round(total_saved, 4),
         "actual_spent": round(actual_spent, 4),
@@ -514,7 +553,8 @@ def get_optimizer_stats(period="7d"):
         "event_count": len(recent_events),
         "by_type": {k: {"count": v["count"], "saved": round(v["saved"], 4)} for k, v in by_type.items()},
         "daily": daily_list,
-        "recent_events": recent_events
+        "recent_events": recent_events,
+        "routing_groups": routing_groups,
     }
 
 

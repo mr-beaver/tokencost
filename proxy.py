@@ -662,12 +662,25 @@ async def proxy_anthropic(path: str, request: Request):
     orig_model, routed, score = route_model(body_bytes)
     try:
         body_data = json.loads(body_bytes)
+        from optimizer import should_skip_routing
         if routed:
-            body_data["model"] = routed
-            print(f"  [routing] {orig_model} → {routed} (score={score})")
-            optimizations = [("routing", f"{orig_model} → {routed} (score={score})")]
+            if should_skip_routing(orig_model, routed, now, body_bytes):
+                print(f"  [routing] skipped {orig_model} → {routed} (cache warm, score={score})")
+                routed = None
+                optimizations = []
+            else:
+                body_data["model"] = routed
+                print(f"  [routing] {orig_model} → {routed} (score={score})")
+                optimizations = [("routing", f"{orig_model} → {routed} (score={score})")]
         else:
             optimizations = []
+
+        # For simple requests (score 0-2) staying on Haiku, set effort:low to reduce tokens
+        if not routed and score <= 2 and orig_model and "haiku" in orig_model.lower():
+            body_data.setdefault("output_config", {})["effort"] = "low"
+        # Also set effort:low when routing TO Haiku
+        if routed and "haiku" in routed.lower() and score <= 2:
+            body_data.setdefault("output_config", {})["effort"] = "low"
         # strip effort/thinking/betas — effort causes 400 on current API version
         for key in ("effort", "thinking", "betas"):
             body_data.pop(key, None)
@@ -705,6 +718,10 @@ async def proxy_anthropic(path: str, request: Request):
     content_type = resp.headers.get("content-type", "")
     model, inp, out, cr, cw, stop, tools, tool_names, msg_id = _parse_anthropic(
         resp.content, content_type)
+
+    # Track per-session cache state so next request can decide whether to route
+    from optimizer import record_cache_state
+    record_cache_state(model, now, body_bytes=body_bytes, cache_write_tokens=cw)
 
     # Calculate optimizer savings
     from optimizer import calculate_optimization_savings
@@ -826,6 +843,15 @@ def stats(period: str = "7d"):
 def optimizer_stats(period: str = "7d"):
     from db import get_optimizer_stats
     return get_optimizer_stats(period)
+
+
+@app.get("/optimizer-status")
+def optimizer_status():
+    from optimizer import routing_skipped_count
+    return {
+        "smart_routing_enabled":    _smart_routing_enabled(),
+        "routing_skipped_for_cache": routing_skipped_count(),
+    }
 
 
 @app.get("/projects")

@@ -273,17 +273,21 @@ Read from `.smart_routing` file — **no proxy restart needed** when toggling.
 | 3–5   | Sonnet 4.6    | stays Sonnet | — |
 | 6–10  | any           | stays original | — |
 
-**Note on prompt caching:** When a model is downrouted, the prompt cache is re-keyed to the target model, not the original. This means you lose potential cache reuse on the original model. However, for the simple requests that get downrouted (score ≤2), this cache tradeoff is negligible compared to the 5–50× cost savings. Complex requests that would benefit from cache reuse (score 6–10) are never downrouted.
+### Cache-Aware Routing (v1.0.9+)
 
-### Does Switching Models Break the Cache?
+**Problem:** Each model switch invalidates Anthropic's prompt cache. The cache is per-model — if a session uses Sonnet, then Haiku, then Sonnet again, each switch forces a full cache re-write (~$0.30 for an 80k-token Claude Code system prompt). A single round-trip Sonnet→Haiku→Sonnet can cost *more* in cache rebuilds than the routing saves.
 
-**Short answer: no, and routing is still a net win.**
+**Fix:** The proxy now tracks session state and only allows routing in two cases:
+1. **First request of a session** — cache hasn't been written yet, safe to switch
+2. **Cache TTL expired** — more than 5 minutes since the last request to this session
 
-The cache key is based on the request content (system prompt + messages), not the model. When the proxy routes Opus → Haiku, the cheaper model still gets the 90% cache discount on previously cached tokens — you don't pay to re-cache everything.
+In all other cases, the original model is kept to preserve the cache hit.
 
-The actual concern is more subtle: different models have different input prices, so the absolute dollar value of the cache discount differs slightly between Opus and Haiku. But the base price of Haiku is so much lower to begin with that the combined savings (cheaper model × cache discount) are always greater than staying on the expensive model with cache alone.
+**Session detection:** The proxy identifies a session by SHA256 of the first 500 chars of the system prompt. This is stable within one Claude Code project, and resets on `/compact`, `/clear`, or a new project.
 
-The only scenario where routing could hurt is routing *up* — sending a cheap model's request to an expensive one. The proxy never does this. Routing is strictly downward (Fable/Opus → Sonnet → Haiku) and only for requests scored 0–5. High-complexity requests that benefit most from caching (score 6–10) are always left on the original model.
+**Signal used:** `cache_creation_tokens > 0` in the response = cache was written for this model = routing blocked until TTL expires. This is more precise than a timer alone.
+
+**Dashboard:** `/dashboard#optimizer` shows "routing_skipped_for_cache: N" in the status banner — how many routing decisions were blocked to preserve the cache this session.
 
 ### Dashboard Optimizer Tab
 
@@ -388,23 +392,19 @@ Automatically detects a **new session** (count drops sharply — user did `/clea
 **Protects:** last 3 + `tool_use`/`tool_result` blocks.  
 **Benefit:** proactively prevents "prompt too long" error in VS Code — it occurs client-side, before the request reaches the proxy, so `trim_old_messages` can't catch it.
 
-### 5. Limit thinking budget
+### 5. Adaptive thinking + effort tuning
 **File:** `optimizer.py → limit_thinking_budget()`  
-If the request has `thinking: {type: "enabled"}` but `budget_tokens` is not set — sets a limit automatically.  
-The limit depends on `complexity_score()`:
+If the request has `thinking: {type: "adaptive"}` but no `output_config.effort` — sets effort based on complexity:
 
-| complexity_score | budget_tokens | When |
-|-----------------|---------------|------|
-| 0–3             | 2 000 tokens  | Simple question |
-| 4–6             | 5 000 tokens  | Medium request |
-| 7–10            | no limit      | Complex task |
+| complexity_score | effort | When |
+|-----------------|--------|------|
+| 0–3             | medium | Simple question |
+| 4–6             | high   | Medium request |
+| 7–10            | (unset) | Complex task — let model decide |
 
-`complexity_score()` counts from 0 to 10 based on three factors:
-- number of messages (+1 per 2 messages, max +4)
-- total content length (+1 per 20k chars, max +4)
-- presence of `tool_use`/`tool_result` blocks (+2)
+Also strips any legacy `budget_tokens` field (causes 400 on Opus 4.7+ / Fable 5).
 
-**Savings:** without a limit, thinking can spend 10 000–30 000 tokens on a simple question. With a 2 000 budget — 80–90% savings on thinking tokens.
+**Savings:** adaptive thinking with `effort=medium` uses significantly fewer thinking tokens on simple requests compared to unconstrained `effort=high`.
 
 ### 6. Deduplication of identical requests
 **File:** `optimizer.py → dedup_check() / dedup_cache_response()`  

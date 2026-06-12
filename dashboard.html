@@ -811,6 +811,9 @@ style="display:contents"></div>
 <div id="optimizer-view" style="display:none;padding:20px 28px">
   <div class="sec-label" style="margin-bottom:16px">Optimizer — automatic savings · savings by type · ROI</div>
 
+  <!-- Status banner -->
+  <div id="opt-status-banner" style="margin-bottom:16px;padding:12px 18px;border-radius:8px;font-family:var(--mono);font-size:12px;display:flex;align-items:center;gap:10px"></div>
+
   <!-- Legend: all optimization techniques -->
   <div class="card" style="padding:16px 20px;margin-bottom:18px;background:#f8fafc">
     <div style="font-family:var(--mono);font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:12px;font-weight:700">Optimization techniques — legend</div>
@@ -2380,74 +2383,78 @@ function renderOptimizerTypes(mainStats) {
 function renderOptimizerRouting(mainStats, optStats) {
   const tbody   = document.getElementById('opt-routing-tbody');
   const countEl = document.getElementById('opt-routing-count');
-  const saved   = mainStats?.haiku_savings?.savings ?? 0;
-  const reqs    = mainStats?.haiku_savings?.requests ?? 0;
 
-  countEl.textContent = reqs > 0 ? `${reqs.toLocaleString()} requests · $${saved.toFixed(2)} saved` : '';
+  // Use routing_groups if available (new API), else fall back to building from recent_events
+  let groups = optStats?.routing_groups ?? null;
+  if (!groups) {
+    const byKey = {};
+    for (const e of (optStats?.recent_events ?? []).filter(e => e.type === 'routing')) {
+      const from = e.details?.from ?? '?';
+      const to   = e.details?.to   ?? '?';
+      const eff  = e.effort || 'standard';
+      const key  = `${from}→${to}→${eff}`;
+      if (!byKey[key]) byKey[key] = { from, to, effort: eff, count: 0, saved: 0, ts_last: '', avg_input_tokens: 0, avg_output_tokens: 0, _in_sum: 0, _out_sum: 0 };
+      byKey[key].count++;
+      byKey[key].saved += e.saved_usd ?? 0;
+      byKey[key]._in_sum  += e.input_tokens  ?? 0;
+      byKey[key]._out_sum += e.output_tokens ?? 0;
+      if (!byKey[key].ts_last || e.ts > byKey[key].ts_last) byKey[key].ts_last = e.ts;
+    }
+    groups = Object.values(byKey).map(g => ({
+      ...g,
+      saved: g.saved,
+      avg_input_tokens:  g.count ? Math.round(g._in_sum  / g.count) : 0,
+      avg_output_tokens: g.count ? Math.round(g._out_sum / g.count) : 0,
+    }));
+    // Scale totals to haiku_savings authoritative figure
+    const haikuSaved = mainStats?.haiku_savings?.savings ?? 0;
+    const evtSaved = groups.reduce((s, g) => s + g.saved, 0);
+    if (evtSaved > 0 && haikuSaved > evtSaved * 2) {
+      const scale = haikuSaved / evtSaved;
+      groups.forEach(g => { g.saved = g.saved * scale; });
+    }
+    groups.sort((a, b) => b.saved - a.saved);
+  }
+  const totalSaved = groups.reduce((s, g) => s + (g.saved || 0), 0);
+  const totalReqs  = groups.reduce((s, g) => s + (g.count || 0), 0);
 
-  // Build per-route groups from optimizer-stats recent_events
-  const routingEvents = (optStats?.recent_events ?? []).filter(e => e.type === 'routing');
+  countEl.textContent = totalReqs > 0
+    ? `${totalReqs.toLocaleString()} requests · $${totalSaved.toFixed(2)} saved`
+    : '';
 
-  if (!routingEvents.length && !reqs) {
+  if (!groups.length) {
     tbody.innerHTML = `<tr><td colspan="9" style="padding:14px;text-align:center;font-family:var(--mono);font-size:11px;color:var(--muted)">No routing for this period (smart routing disabled or period=today with low traffic)</td></tr>`;
     return;
   }
 
-  // Group by from→to
-  const groups = {};
-  for (const e of routingEvents) {
-    const from = e.details?.from ?? '?';
-    const to   = e.details?.to   ?? '?';
-    const key  = `${from}→${to}`;
-    if (!groups[key]) groups[key] = { from, to, count: 0, saved: 0, ts_last: '' };
-    groups[key].count++;
-    groups[key].saved += e.saved_usd ?? 0;
-    if (!groups[key].ts_last || e.ts > groups[key].ts_last) groups[key].ts_last = e.ts;
-  }
+  const effortColor = e => e === 'low' ? '#6b7280' : e === 'medium' ? '#d97706' : e === 'high' ? '#0ea5e9' : e === 'xhigh' ? '#7c3aed' : 'var(--muted)';
 
-  const rows = Object.values(groups).sort((a, b) => b.saved - a.saved);
-
-  // If we have no events but haiku_savings has data, show aggregated fallback
-  if (!rows.length) {
-    const actual  = mainStats?.haiku_savings?.actual ?? 0;
-    const equiv   = mainStats?.haiku_savings?.haiku_equivalent ?? 0;
-    const origModels = mainStats?.haiku_savings?.original_models ?? [];
-    const origLabel = origModels.length ? origModels.map(shortModel).join(' / ') : 'Sonnet / Opus';
-    tbody.innerHTML = `
-      <tr style="background:#f0fdf4">
-        <td colspan="2" style="padding:10px 18px;font-family:var(--mono);font-size:11px;color:var(--muted)">Aggregated data for period</td>
-        <td style="padding:10px 12px;font-family:var(--mono);font-size:11px;color:#374151">${origLabel}</td>
-        <td style="padding:10px 12px;font-family:var(--mono);font-size:11px;color:#16a34a;font-weight:600">→ Haiku</td>
-        <td colspan="3" style="padding:10px 12px;font-family:var(--mono);font-size:11px;color:var(--muted)">—</td>
-        <td style="padding:10px 12px;text-align:right;font-family:var(--mono);font-size:12px;color:var(--hi);font-weight:600">$${actual.toFixed(2)}</td>
-        <td style="padding:10px 18px 10px 12px;text-align:right;font-family:var(--mono);font-size:12px;color:#16a34a;font-weight:700">$${saved.toFixed(2)}</td>
-      </tr>`;
-    return;
-  }
-
-  tbody.innerHTML = rows.map(g => {
+  tbody.innerHTML = groups.map(g => {
     const ts = g.ts_last ? new Date(g.ts_last).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
     const fromShort = shortModel(g.from);
     const toShort   = shortModel(g.to);
-    // color from model tier
     const fromColor = g.from.includes('fable') ? '#7c3aed' : g.from.includes('opus') ? '#ea580c' : '#2563eb';
     const toColor   = g.to.includes('haiku') ? '#16a34a' : '#2563eb';
+    const avgIn  = g.avg_input_tokens  > 0 ? g.avg_input_tokens.toLocaleString()  : '—';
+    const avgOut = g.avg_output_tokens > 0 ? g.avg_output_tokens.toLocaleString() : '—';
+    const eff = g.effort && g.effort !== 'standard' ? g.effort : '—';
     return `<tr style="border-bottom:1px solid var(--border)">
       <td style="padding:8px 18px;font-family:var(--mono);font-size:11px;color:var(--muted)">${ts}</td>
       <td style="padding:8px 12px;font-family:var(--mono);font-size:11px;color:var(--muted);text-align:right">${g.count.toLocaleString()}×</td>
       <td style="padding:8px 12px;font-family:var(--mono);font-size:11px;font-weight:600;color:${fromColor}">${fromShort}</td>
       <td style="padding:8px 12px;font-family:var(--mono);font-size:11px;font-weight:600;color:${toColor}">→ ${toShort}</td>
       <td style="padding:8px 12px;font-family:var(--mono);font-size:11px;color:var(--muted);text-align:right">${g.count.toLocaleString()}</td>
-      <td colspan="2" style="padding:8px 12px;font-family:var(--mono);font-size:11px;color:var(--muted)">—</td>
-      <td style="padding:8px 12px;text-align:right;font-family:var(--mono);font-size:11px;color:var(--muted)">—</td>
-      <td style="padding:8px 18px 8px 12px;text-align:right;font-family:var(--mono);font-size:12px;color:#16a34a;font-weight:700">$${g.saved.toFixed(4)}</td>
+      <td style="padding:8px 12px;font-family:var(--mono);font-size:11px;color:var(--muted);text-align:right">${avgIn}</td>
+      <td style="padding:8px 12px;font-family:var(--mono);font-size:11px;color:var(--muted);text-align:right">${avgOut}</td>
+      <td style="padding:8px 12px;text-align:right;font-family:var(--mono);font-size:11px;color:${effortColor(g.effort)}">${eff}</td>
+      <td style="padding:8px 18px 8px 12px;text-align:right;font-family:var(--mono);font-size:12px;color:#16a34a;font-weight:700">$${(g.saved||0).toFixed(2)}</td>
     </tr>`;
   }).join('') + `
     <tr style="background:#f0fdf4;border-top:2px solid #bbf7d0">
       <td colspan="2" style="padding:8px 18px;font-family:var(--mono);font-size:11px;color:var(--muted)">Total</td>
-      <td colspan="5" style="padding:8px 12px;font-family:var(--mono);font-size:11px;color:var(--muted)">${reqs.toLocaleString()} requests switched</td>
+      <td colspan="5" style="padding:8px 12px;font-family:var(--mono);font-size:11px;color:var(--muted)">${totalReqs.toLocaleString()} requests switched</td>
       <td style="padding:8px 12px;text-align:right;font-family:var(--mono);font-size:11px;color:var(--muted)">—</td>
-      <td style="padding:8px 18px 8px 12px;text-align:right;font-family:var(--mono);font-size:12px;color:#16a34a;font-weight:700">$${saved.toFixed(2)}</td>
+      <td style="padding:8px 18px 8px 12px;text-align:right;font-family:var(--mono);font-size:12px;color:#16a34a;font-weight:700">$${totalSaved.toFixed(2)}</td>
     </tr>`;
 }
 
@@ -2484,13 +2491,33 @@ function renderOptimizerDaily(mainStats, period) {
   axis.innerHTML  = daily.map(d => `<span style="width:26px;text-align:center;display:inline-block;font-family:var(--mono);font-size:9px;color:var(--muted)">${(d.date||'').slice(5)}</span>`).join('');
 }
 
+function renderOptimizerStatusBanner(statusData) {
+  const banner = document.getElementById('opt-status-banner');
+  if (!statusData) { banner.style.display = 'none'; return; }
+  banner.style.display = 'flex';
+  const enabled = statusData?.smart_routing_enabled ?? false;
+  if (enabled) {
+    banner.style.background = '#f0fdf4';
+    banner.style.border = '1px solid #bbf7d0';
+    banner.style.color = '#15803d';
+    banner.innerHTML = `<span style="font-size:14px">●</span> <span style="font-weight:700">Smart Routing — ENABLED</span><span style="color:#6b7280;margin-left:6px">· automatically switching low-effort requests to Haiku to save cost</span>`;
+  } else {
+    banner.style.background = '#fafafa';
+    banner.style.border = '1px solid #e5e7eb';
+    banner.style.color = '#6b7280';
+    banner.innerHTML = `<span style="font-size:14px;color:#d1d5db">○</span> <span style="font-weight:700;color:#374151">Smart Routing — DISABLED</span><span style="margin-left:10px">To enable: run <code style="background:#f3f4f6;padding:2px 6px;border-radius:4px;color:#111;font-size:11px">tokencost</code> in terminal and enable Smart Routing in Onboarding</span>`;
+  }
+}
+
 async function refreshOptimizer() {
   try {
-    const [mainStats, optStats] = await Promise.all([
+    const [mainStats, optStats, statusData] = await Promise.all([
       fetch(`/stats?period=${period}`).then(r => r.json()),
       fetch(`/optimizer-stats?period=${period}`).then(r => r.json()),
+      fetch(`/optimizer-status`).then(r => r.ok ? r.json() : null).catch(() => null),
     ]);
 
+    renderOptimizerStatusBanner(statusData);
     renderOptimizerKpis(mainStats, period);
     renderOptimizerTypes(mainStats);
     renderOptimizerRouting(mainStats, optStats);
