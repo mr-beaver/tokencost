@@ -732,6 +732,7 @@ style="display:contents"></div>
       <th style="min-width:80px">Source</th>
       <th style="min-width:50px;text-align:right">Reqs</th>
       <th style="min-width:90px;text-align:right" title="Total input tokens · cost below">Input tok</th>
+      <th style="min-width:90px;text-align:right" title="Cache write tokens — billed at 125% of input price">CW tok</th>
       <th style="min-width:90px;text-align:right" title="Total output tokens · cost below">Output tok</th>
       <th style="min-width:140px">Top Tools</th>
       <th style="min-width:80px;text-align:right">Total $</th>
@@ -761,6 +762,7 @@ style="display:contents"></div>
         <th style="min-width:120px">Model</th>
         <th style="min-width:70px;text-align:right" title="Input tokens (non-cached)">In tok</th>
         <th style="min-width:90px;text-align:right" title="Cache read tokens — billed at 10% of input price">Cache↑ tok</th>
+        <th style="min-width:90px;text-align:right" title="Cache write tokens — billed at 125% of input price (first write per session)">CW tok</th>
         <th style="min-width:70px;text-align:right" title="Output tokens">Out tok</th>
         <th style="min-width:55px;text-align:right">Tools</th>
         <th style="min-width:60px">Stop</th>
@@ -787,6 +789,7 @@ style="display:contents"></div>
         <th style="min-width:120px">Model</th>
         <th style="min-width:70px;text-align:right" title="Input tokens (non-cached)">In tok</th>
         <th style="min-width:90px;text-align:right" title="Cache read tokens — billed at 10% of input price">Cache↑ tok</th>
+        <th style="min-width:90px;text-align:right" title="Cache write tokens — billed at 125% of input price (first write per session)">CW tok</th>
         <th style="min-width:70px;text-align:right" title="Output tokens">Out tok</th>
         <th style="min-width:55px;text-align:right">Tools</th>
         <th style="min-width:60px">Stop</th>
@@ -923,6 +926,7 @@ style="display:contents"></div>
           <th style="min-width:130px">Model</th>
           <th style="min-width:65px;text-align:right" title="Input tokens (non-cached)">In tok</th>
           <th style="min-width:65px;text-align:right" title="Cache read tokens — billed at 10% of input price">Cache↑ tok</th>
+          <th style="min-width:65px;text-align:right" title="Cache write tokens — billed at 125% of input price">CW tok</th>
           <th style="min-width:65px;text-align:right" title="Output tokens">Out tok</th>
           <th style="min-width:45px;text-align:right">Tools</th>
           <th style="min-width:95px">Activity</th>
@@ -1521,7 +1525,10 @@ function renderSessPage() {
     ? `<span style="font-family:var(--mono)">${fmtTok(tok)}</span><br><span style="color:#9ca3af;font-size:10px">$${Number(cost||0).toFixed(3)}</span>`
     : '—';
   const tbody = document.getElementById('sessions-body');
-  if (!page.length) { tbody.innerHTML = `<tr><td colspan="10" class="empty">No sessions yet</td></tr>`; return; }
+  const cwCell = tok => tok
+    ? `<span style="font-family:var(--mono);color:var(--warn)">${fmtTok(tok)}</span>`
+    : '<span style="color:var(--muted)">—</span>';
+  if (!page.length) { tbody.innerHTML = `<tr><td colspan="11" class="empty">No sessions yet</td></tr>`; return; }
   tbody.innerHTML = page.map(s => `
     <tr>
       <td class="c-muted">${fmtDate(s.start)}</td>
@@ -1531,21 +1538,23 @@ function renderSessPage() {
       <td>${(s.sources||[]).map(sourceTag).join(' ')}</td>
       <td class="c-muted">${s.req_count}</td>
       <td class="c-muted">${tokCell(s.total_input, s.input_cost)}</td>
+      <td style="text-align:right">${cwCell(s.total_cache_write)}</td>
       <td class="c-muted">${tokCell(s.total_output, s.output_cost)}</td>
       <td class="c-muted" style="font-size:10px">${(s.top_tools||[]).slice(0,3).map(t=>`${t.name}×${t.count}`).join(' ')||'—'}</td>
       <td class="c-ok">${fmtCost(s.total_cost)}</td>
     </tr>`).join('');
-  // Totals over ALL sessions (not just page)
   const sessTot = _sessions.reduce((a,s) => ({
     reqs: a.reqs+(s.req_count||0), cost: a.cost+(s.total_cost||0),
-    inp: a.inp+(s.total_input||0), out: a.out+(s.total_output||0),
+    inp: a.inp+(s.total_input||0), cw: a.cw+(s.total_cache_write||0),
+    out: a.out+(s.total_output||0),
     inpCost: a.inpCost+(s.input_cost||0), outCost: a.outCost+(s.output_cost||0),
-  }), {reqs:0, cost:0, inp:0, out:0, inpCost:0, outCost:0});
+  }), {reqs:0, cost:0, inp:0, cw:0, out:0, inpCost:0, outCost:0});
   document.getElementById('sessions-foot').innerHTML = `
     <tr class="tfoot-total">
       <td colspan="5">TOTAL (${total} sessions)</td>
       <td>${sessTot.reqs}</td>
       <td>${tokCell(sessTot.inp, sessTot.inpCost)}</td>
+      <td style="text-align:right">${cwCell(sessTot.cw)}</td>
       <td>${tokCell(sessTot.out, sessTot.outCost)}</td>
       <td>—</td>
       <td class="c-ok">${fmtCost(sessTot.cost)}</td>
@@ -1781,9 +1790,10 @@ async function refresh() {
   const topRows = d.top_requests || [];
   const topTot = topRows.reduce((a,r) => ({
     inp: a.inp+(r.input_tokens||0), cr: a.cr+(r.cache_read_tokens||0),
+    cw: a.cw+(r.cache_creation_tokens||0),
     out: a.out+(r.output_tokens||0), tools: a.tools+(r.tool_call_count||0),
     cost: a.cost+(r.cost_usd||0), dur: a.dur+(r.duration_ms||0)
-  }), {inp:0,cr:0,out:0,tools:0,cost:0,dur:0});
+  }), {inp:0,cr:0,cw:0,out:0,tools:0,cost:0,dur:0});
   const numTd = (val, cls='c-muted') => `<td style="text-align:right" class="${cls}">${val}</td>`;
   document.getElementById('top-body').innerHTML = topRows.length
     ? topRows.map(r => `
@@ -1793,6 +1803,7 @@ async function refresh() {
           <td class="c-muted" style="white-space:nowrap">${r.model.replace('claude-','').replace(/-20\d{6}$/,'')}</td>
           ${numTd(fmt(r.input_tokens))}
           ${numTd(fmt(r.cache_read_tokens||0),'c-good')}
+          ${numTd(r.cache_creation_tokens ? fmt(r.cache_creation_tokens) : '—', r.cache_creation_tokens ? 'c-hi' : 'c-muted')}
           ${numTd(fmt(r.output_tokens))}
           ${numTd(r.tool_call_count||0)}
           <td>${stopBadge(r.stop_reason)}</td>
@@ -1803,13 +1814,14 @@ async function refresh() {
           <td colspan="3">TOTAL (${topRows.length} rows)</td>
           ${numTd(fmt(topTot.inp))}
           ${numTd(fmt(topTot.cr),'c-good')}
+          ${numTd(topTot.cw ? fmt(topTot.cw) : '—', 'c-hi')}
           ${numTd(fmt(topTot.out))}
           ${numTd(topTot.tools)}
           <td>—</td>
           ${numTd(fmtCost(topTot.cost),'c-ok')}
           ${numTd(fmtExecTime(topTot.dur))}
         </tr>`
-    : `<tr><td colspan="10" class="empty">No data</td></tr>`;
+    : `<tr><td colspan="11" class="empty">No data</td></tr>`;
 
   // ── Recent requests
   const tbody = document.getElementById('recent-body');
@@ -1821,9 +1833,10 @@ async function refresh() {
     const recRows = d.recent;
     const recTot = recRows.reduce((a,r) => ({
       inp: a.inp+(r.input_tokens||0), cr: a.cr+(r.cache_read_tokens||0),
+      cw: a.cw+(r.cache_creation_tokens||0),
       out: a.out+(r.output_tokens||0), tools: a.tools+(r.tool_call_count||0),
       cost: a.cost+(r.cost_usd||0), dur: a.dur+(r.duration_ms||0)
-    }), {inp:0,cr:0,out:0,tools:0,cost:0,dur:0});
+    }), {inp:0,cr:0,cw:0,out:0,tools:0,cost:0,dur:0});
     tbody.innerHTML = recRows.map(r => `
       <tr>
         <td class="c-muted" style="white-space:nowrap">${fmtTime(r.ts)}</td>
@@ -1831,6 +1844,7 @@ async function refresh() {
         <td class="c-muted" style="white-space:nowrap">${r.model.replace('claude-','').replace(/-20\d{6}$/,'')}</td>
         ${numTd(fmt(r.input_tokens))}
         ${numTd(fmt(r.cache_read_tokens||0),'c-good')}
+        ${numTd(r.cache_creation_tokens ? fmt(r.cache_creation_tokens) : '—', r.cache_creation_tokens ? 'c-hi' : 'c-muted')}
         ${numTd(fmt(r.output_tokens))}
         ${numTd(r.tool_call_count||0)}
         <td>${stopBadge(r.stop_reason)}</td>
@@ -1842,6 +1856,7 @@ async function refresh() {
         <td colspan="3">TOTAL (${recRows.length} rows)</td>
         ${numTd(fmt(recTot.inp))}
         ${numTd(fmt(recTot.cr),'c-good')}
+        ${numTd(recTot.cw ? fmt(recTot.cw) : '—', 'c-hi')}
         ${numTd(fmt(recTot.out))}
         ${numTd(recTot.tools)}
         <td>—</td>
@@ -2108,6 +2123,7 @@ function renderRawLogs() {
       <td class="${modelClass(r.model)}" style="font-family:var(--mono);font-size:12px;white-space:nowrap">${shortModel(r.model)}</td>
       <td style="text-align:right" class="c-muted">${fmt(r.input_tokens)}</td>
       <td style="text-align:right" class="c-good">${r.cache_read_tokens ? fmt(r.cache_read_tokens) : '—'}</td>
+      <td style="text-align:right" class="${r.cache_creation_tokens ? 'c-hi' : 'c-muted'}">${r.cache_creation_tokens ? fmt(r.cache_creation_tokens) : '—'}</td>
       <td style="text-align:right" class="c-muted">${fmt(r.output_tokens)}</td>
       <td style="text-align:right" class="c-muted">${r.tool_call_count || '—'}</td>
       <td>${actCell}</td>

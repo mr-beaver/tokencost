@@ -554,8 +554,9 @@ def get_sessions(period="7d", limit=50):
         sources  = list({r[1] for r in session})
         costs    = [r[2] or 0.0 for r in session]
 
-        total_input  = sum(r[6] or 0 for r in session)
-        total_output = sum(r[7] or 0 for r in session)
+        total_input       = sum(r[6] or 0 for r in session)
+        total_output      = sum(r[7] or 0 for r in session)
+        total_cache_write = sum(r[9] or 0 for r in session)
 
         input_cost = output_cost = 0.0
         for r in session:
@@ -590,10 +591,11 @@ def get_sessions(period="7d", limit=50):
             "total_cost":   round(sum(costs), 5),
             "max_cost":     round(max(costs), 5),
             "top_tools":    [{"name": k, "count": v} for k, v in top_tools],
-            "total_input":  total_input,
-            "total_output": total_output,
-            "input_cost":   round(input_cost, 5),
-            "output_cost":  round(output_cost, 5),
+            "total_input":       total_input,
+            "total_output":      total_output,
+            "total_cache_write": total_cache_write,
+            "input_cost":        round(input_cost, 5),
+            "output_cost":       round(output_cost, 5),
         })
     return result
 
@@ -1477,6 +1479,7 @@ def get_stats(period="7d"):
 
     top_requests = [dict(r) for r in con.execute(f"""
         SELECT ts, source, model, input_tokens, output_tokens, cache_read_tokens,
+               cache_creation_tokens,
                stop_reason, tool_call_count, tools_json,
                ROUND(cost_usd,5) as cost_usd, duration_ms, status
         FROM requests WHERE 1=1 {clause}
