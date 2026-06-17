@@ -1,10 +1,27 @@
-# v1.1.3 — fix: effort/betas stripping and disable restore
+# v1.1.3 — Forward the request body verbatim (fixes modern Claude Code 400s)
 
-- **Fix: effort/betas now only stripped for Haiku** — previously stripped unconditionally from all requests, silently degrading extended thinking on Sonnet/Opus routes
-- **Fix: thinking field no longer stripped** — valid on all models, was incorrectly removed
+The proxy's request path mutated parts of the body/headers it had no reason to
+touch — code written against an older API that broke current Claude Code with a
+chain of 400s (orphaned `clear_thinking` strategy, missing `thinking.budget_tokens`,
+top-level `cache_control` TTL collision, `context-1m` header on a downgraded model).
+
+This replaces those mutations with one principle: **forward the client's request
+verbatim, with two scoped exceptions** (see `docs/adr/0001`):
+
+- **Routing normalization** — when routing rewrites `model` to a cheaper target,
+  also strip what that target rejects: the `context-1m` beta header (smaller
+  context window), and `output_config.effort` **only when routing to Haiku 4.5**
+  (which 400s on the effort param; Sonnet 4.6 keeps it). Previously `effort` was
+  stripped unconditionally — needlessly dropping it on requests that stayed on Opus.
+- **Opt-in cache optimization** — inject a top-level `cache_control` only when the
+  client set none anywhere (top-level/system/tools/messages). Clients that manage
+  their own caching (e.g. Claude Code's 1h TTL) are left untouched.
+
+Removed: unconditional `effort`/`thinking`/`betas` body stripping; the dead-and-
+harmful `effort:"low"` Haiku injection (it was popped immediately, and would 400
+on Haiku if it weren't). `thinking` and `budget_tokens` now pass through unchanged.
+
 - **Fix: disable restores ANTHROPIC_BASE_URL** — instead of unsetting the variable, disable now points it back to `api.anthropic.com` so VS Code and Claude CLI keep working without restart
-
----
 
 # v1.1.2 — docs: update info.md with v1.1.1 scoring changes
 
