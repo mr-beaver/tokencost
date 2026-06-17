@@ -433,18 +433,17 @@ def auto_enable_thinking(body_data: dict) -> tuple:
 
 def limit_thinking_budget(body_data: dict) -> tuple:
     """
-    Adjust effort level for thinking mode based on complexity.
-    budget_tokens is deprecated on Opus 4.7+ — use effort instead.
-    Strips budget_tokens if present (causes 400 on modern models).
+    Tune effort for adaptive thinking based on complexity.
     Returns (modified_body_data, optimization_tag_if_applied).
+
+    NOTE: do NOT strip `budget_tokens`. The current API *requires* it for
+    `thinking: {type: "enabled"}` and 400s with "thinking.enabled.budget_tokens:
+    Field required" without it. (An earlier version stripped it as "deprecated";
+    that was wrong and broke every thinking-enabled Claude Code request.)
     """
     thinking = body_data.get("thinking")
     if not thinking or not isinstance(thinking, dict):
         return body_data, None
-
-    # Strip deprecated budget_tokens — causes 400 on Opus 4.7+
-    if "budget_tokens" in thinking:
-        thinking.pop("budget_tokens")
 
     # If adaptive thinking is set but no effort, tune by complexity
     if thinking.get("type") == "adaptive" and "output_config" not in body_data:
@@ -459,6 +458,33 @@ def limit_thinking_budget(body_data: dict) -> tuple:
     return body_data, None
 
 
+def _has_cache_control(body_data: dict) -> bool:
+    """True if the request already carries cache_control anywhere — top-level,
+    system blocks, tools, or message content blocks.
+
+    Claude Code sets its own cache_control (often ttl='1h') on its blocks.
+    Injecting a top-level ephemeral default (ttl='5m') then 400s with
+    "Top-level cache_control has ttl='5m' but the target block already has
+    cache_control with ttl='1h'". When the client already manages caching,
+    our injection is both redundant and harmful, so skip it.
+    """
+    if body_data.get("cache_control"):
+        return True
+    system = body_data.get("system")
+    if isinstance(system, list) and any(
+            isinstance(b, dict) and b.get("cache_control") for b in system):
+        return True
+    for tool in body_data.get("tools") or []:
+        if isinstance(tool, dict) and tool.get("cache_control"):
+            return True
+    for msg in body_data.get("messages") or []:
+        content = msg.get("content")
+        if isinstance(content, list) and any(
+                isinstance(b, dict) and b.get("cache_control") for b in content):
+            return True
+    return False
+
+
 def optimize_request(body_data: dict) -> tuple:
     """
     Apply all cost optimizations to the request body.
@@ -470,6 +496,12 @@ def optimize_request(body_data: dict) -> tuple:
     body_data, thinking_opt = limit_thinking_budget(body_data)
     if thinking_opt:
         optimizations.append(thinking_opt)
+
+    # Skip cache injection if the client already manages cache_control on any
+    # block — adding a top-level ephemeral (ttl='5m') default collides with the
+    # client's block-level ttl (e.g. Claude Code's '1h') and 400s.
+    if _has_cache_control(body_data):
+        return body_data, optimizations
 
     # 1. Auto cache_control on system prompt if not already cached
     if "system" in body_data:

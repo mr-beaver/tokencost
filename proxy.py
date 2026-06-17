@@ -668,25 +668,36 @@ async def proxy_anthropic(path: str, request: Request):
                 optimizations = []
             else:
                 body_data["model"] = routed
+                # Routing downgrades the model for simple prompts. Normalize ONLY
+                # what the cheaper target can't accept; forward everything else the
+                # client sent unchanged (see docs/adr/0001).
+                #
+                # context-1m beta header: a [1m] session sends
+                # `anthropic-beta: context-1m-…`; a smaller-context model rejects
+                # it ("400 The long context beta is not yet available for this
+                # subscription"). It's an HTTP header, not a body field.
+                for hk in list(headers):
+                    if hk.lower() == "anthropic-beta":
+                        kept = [b.strip() for b in headers[hk].split(",")
+                                if not b.strip().startswith("context-1m")]
+                        if kept:
+                            headers[hk] = ",".join(kept)
+                        else:
+                            del headers[hk]
+                # effort parameter: Haiku 4.5 rejects output_config.effort (400).
+                # Claude Code sends effort with Opus; strip it only when the
+                # downgrade target can't take it.
+                if "haiku" in routed.lower():
+                    body_data.pop("effort", None)
+                    oc = body_data.get("output_config")
+                    if isinstance(oc, dict):
+                        oc.pop("effort", None)
+                        if not oc:
+                            body_data.pop("output_config", None)
                 print(f"  [routing] {orig_model} → {routed} (score={score})")
                 optimizations = [("routing", f"{orig_model} → {routed} (score={score})")]
         else:
             optimizations = []
-
-        # For simple requests (score 0-2) staying on Haiku, set effort:low to reduce tokens
-        if not routed and score <= 2 and orig_model and "haiku" in orig_model.lower():
-            body_data.setdefault("output_config", {})["effort"] = "low"
-        # Also set effort:low when routing TO Haiku
-        if routed and "haiku" in routed.lower() and score <= 2:
-            body_data.setdefault("output_config", {})["effort"] = "low"
-        # strip effort/thinking/betas — effort causes 400 on current API version
-        for key in ("effort", "thinking", "betas"):
-            body_data.pop(key, None)
-        # effort may also live inside output_config
-        if "output_config" in body_data:
-            body_data["output_config"].pop("effort", None)
-            if not body_data["output_config"]:
-                body_data.pop("output_config")
 
         # ── Cost optimizations ─────────────────────────────────────────────────
         body_data, cost_optimizations = optimize_request(body_data)
