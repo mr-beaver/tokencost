@@ -254,18 +254,23 @@ PRICING = {  # all prices in $/million tokens
 HAIKU_PRICING = {"input": 1.0, "output": 5.0}  # claude-haiku-4-5 baseline
 
 
-def calc_cost(model, input_tok, output_tok, cache_read=0, cache_creation=0):
+def calc_cost(model, input_tok, output_tok, cache_read=0, cache_creation=0, cache_creation_1h=0):
     # Try exact match, then provider/model prefix variants
     p = PRICING.get(model)
     if not p and "/" in model:
         # e.g. "groq/llama-3.3-70b-versatile" → try bare name too
         p = PRICING.get(model.split("/", 1)[1])
     p = p or PRICING["default"]
+    # cache_creation is the TOTAL cache-write tokens; cache_creation_1h is the
+    # 1-hour-TTL portion. 1h writes cost 2x base input, 5-minute writes 1.25x.
+    # Old rows have cache_creation_1h=0 → all priced at 1.25x, unchanged.
+    cache_5m = max(cache_creation - cache_creation_1h, 0)
     return (
-        input_tok      * p["input"] +
-        output_tok     * p["output"] +
-        cache_read     * p["input"] * 0.10 +
-        cache_creation * p["input"] * 1.25
+        input_tok         * p["input"] +
+        output_tok        * p["output"] +
+        cache_read        * p["input"] * 0.10 +
+        cache_5m          * p["input"] * 1.25 +
+        cache_creation_1h * p["input"] * 2.00
     ) / 1_000_000
 
 
@@ -318,8 +323,9 @@ def init_db():
     con.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
     existing = {row[1] for row in con.execute("PRAGMA table_info(requests)")}
     for col, defn in [
-        ("cache_read_tokens",     "INTEGER DEFAULT 0"),
-        ("cache_creation_tokens", "INTEGER DEFAULT 0"),
+        ("cache_read_tokens",        "INTEGER DEFAULT 0"),
+        ("cache_creation_tokens",    "INTEGER DEFAULT 0"),
+        ("cache_creation_1h_tokens", "INTEGER DEFAULT 0"),
         ("user_agent",            "TEXT"),
         ("stop_reason",           "TEXT"),
         ("tool_call_count",       "INTEGER DEFAULT 0"),
@@ -345,19 +351,20 @@ def save_request(source, model, input_tok, output_tok, cache_read, cache_creatio
                  cost, duration_ms, status, user_agent="", stop_reason=None,
                  tool_call_count=0, tools_json=None, effort="standard",
                  prompt_preview="", msg_uuid=None, auto_thinking=False,
-                 optimizations_json=None, optimizer_savings_usd=0):
+                 optimizations_json=None, optimizer_savings_usd=0, cache_creation_1h=0):
     con = sqlite3.connect(DB_PATH)
     con.execute(
         """INSERT OR IGNORE INTO requests
            (ts,source,model,input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens,
             cost_usd,duration_ms,status,user_agent,stop_reason,tool_call_count,tools_json,
-            effort,prompt_preview,msg_uuid,auto_thinking,optimizations_json,optimizer_savings_usd)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            effort,prompt_preview,msg_uuid,auto_thinking,optimizations_json,optimizer_savings_usd,
+            cache_creation_1h_tokens)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (datetime.now(timezone.utc).isoformat(), source, model,
          input_tok, output_tok, cache_read, cache_creation,
          cost, duration_ms, status, user_agent, stop_reason, tool_call_count, tools_json,
          effort or "standard", prompt_preview or "", msg_uuid, 1 if auto_thinking else 0,
-         optimizations_json, optimizer_savings_usd),
+         optimizations_json, optimizer_savings_usd, cache_creation_1h),
     )
     con.commit()
     con.close()
@@ -871,7 +878,8 @@ def _pause_analysis(period):
 
     con = sqlite3.connect(DB_PATH)
     rows = con.execute(
-        f"SELECT ts, cache_creation_tokens FROM requests WHERE 1=1 {clause} ORDER BY ts"
+        f"SELECT ts, cache_creation_tokens, cache_creation_1h_tokens "
+        f"FROM requests WHERE 1=1 {clause} ORDER BY ts"
     ).fetchall()
     con.close()
 
@@ -884,6 +892,7 @@ def _pause_analysis(period):
 
     timestamps = [_naive_dt(r[0]) for r in rows]
     cw_all     = [r[1] or 0 for r in rows]
+    cw_1h_all  = [r[2] or 0 for r in rows]
 
     within_gaps = []   # intra-session gap durations (seconds)
     sessions    = 1
@@ -914,6 +923,15 @@ def _pause_analysis(period):
 
     avg_gap_min = round(sum(within_gaps) / n / 60, 1)
 
+    # Observed write TTL from the actual cache-write breakdown. Old rows (pre
+    # split-tracking) report 1h=0, so a period of only old data reads as "5 min"
+    # and the recommendation behaves exactly as before. Threshold: predominantly
+    # 1h (>=80% of write tokens) → "1h"; predominantly 5m (<=20%) → "5 min".
+    sum_cw       = sum(cw_all)
+    sum_1h       = sum(cw_1h_all)
+    pct_1h       = round(sum_1h / sum_cw * 100) if sum_cw else 0
+    observed_ttl = "1h" if pct_1h >= 80 else ("5 min" if pct_1h <= 20 else "mixed")
+
     return {
         "sessions":       sessions,
         "within_gaps":    n,
@@ -928,6 +946,8 @@ def _pause_analysis(period):
         "net_monthly":    round(net_period / period_days * 30, 2),
         "recommendation": "1h"   if mid > 0 and net_period > 0 else "5min",
         "mid_per_day":    round(mid / period_days, 1),
+        "cache_1h_pct":   pct_1h,
+        "observed_ttl":   observed_ttl,
     }
 
 
@@ -1349,8 +1369,40 @@ def _action_plan(summary, haiku_savings, by_model, period, pause=None):
             daily        = round(net_monthly / 30, 4)
             mid_count    = pause["mid_count"]
             mid_per_day  = pause["mid_per_day"]
+            observed_ttl = pause.get("observed_ttl", "5 min")
+            # Label for what the client is actually writing at, from the observed
+            # cache-write breakdown (not an assumption).
+            current_ttl_label = {"1h": "1 hour",
+                                 "mixed": "mixed (5 min + 1h)"}.get(observed_ttl, "5 min")
 
-            if rec == "1h" and net_monthly > 0:
+            if observed_ttl == "1h":
+                # Already writing at 1h — the mid-session gaps it would otherwise
+                # flag are absorbed by the 1h cache. Recommendation is moot.
+                actions.append({
+                    "id": "cache1h",
+                    "title": "Cache TTL: already on 1-hour (optimal)",
+                    "description": (
+                        f"You're already writing cache at 1h TTL ({pause['cache_1h_pct']}% of "
+                        f"cache-write tokens). Your {mid_count} within-session pauses of 5–60 min "
+                        f"(≈{mid_per_day}/day) are absorbed by the 1h cache instead of forcing "
+                        f"re-writes — no action needed."
+                    ),
+                    "command": "# No change needed. Already on 1h cache TTL.",
+                    "daily_saving":   0,
+                    "monthly_saving": 0,
+                    "certainty":      "exact",
+                    "cache_detail": {
+                        "current_ttl":   "1 hour",
+                        "available_ttl": "1 hour",
+                        "hit_rate":      hit_rate,
+                        "cw_cost":       cw_cost_paid,
+                        "cr_saved":      round(no_cache_cost - cr_cost_paid, 4),
+                        "cw_tokens":     cw,
+                        "cr_tokens":     cr,
+                    },
+                    "pause": pause,
+                })
+            elif rec == "1h" and net_monthly > 0:
                 actions.append({
                     "id": "cache1h",
                     "title": "Enable 1-hour cache TTL",
@@ -1370,7 +1422,7 @@ def _action_plan(summary, haiku_savings, by_model, period, pause=None):
                     "monthly_saving": net_monthly,
                     "certainty":      "estimate",
                     "cache_detail": {
-                        "current_ttl":   "5 min",
+                        "current_ttl":   current_ttl_label,
                         "available_ttl": "1 hour",
                         "hit_rate":      hit_rate,
                         "cw_cost":       cw_cost_paid,
@@ -1395,7 +1447,7 @@ def _action_plan(summary, haiku_savings, by_model, period, pause=None):
                     "monthly_saving": 0,
                     "certainty":      "exact",
                     "cache_detail": {
-                        "current_ttl":   "5 min",
+                        "current_ttl":   current_ttl_label,
                         "available_ttl": "1 hour",
                         "hit_rate":      hit_rate,
                         "cw_cost":       cw_cost_paid,

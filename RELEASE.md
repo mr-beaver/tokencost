@@ -1,3 +1,11 @@
+# v1.1.4 — Cache-write TTL accuracy + clearer cost labelling
+
+Three related changes. All token-accounting math is unchanged for existing rows.
+
+- **1-hour cache writes are now priced correctly.** `calc_cost` charged *all* cache writes at 1.25× base input (the 5-minute rate). 1-hour-TTL writes actually cost 2× base input. The proxy now parses the `usage.cache_creation.ephemeral_1h_input_tokens` split, stores it in a new `cache_creation_1h_tokens` column, and prices `(total − 1h)×1.25 + 1h×2.0`. Old rows have `1h=0`, so their cost is unchanged.
+- **The "Enable 1-hour cache TTL" recommendation is now TTL-aware.** It previously assumed a 5-minute TTL (`current_ttl: "5 min"`) and recommended 1h whenever it saw 5–60 min pauses — including for sessions already writing at 1h (e.g. Claude Code), where those gaps are already absorbed, so the projected re-writes don't actually occur. It now derives the real TTL from the observed write breakdown and, when you're already predominantly on 1h, shows an "already on 1-hour (optimal)" card instead of an inapplicable savings estimate. Degrades to prior behaviour on split-less historical data.
+- **The dashboard cost figure is labelled as notional.** "Total Cost" now carries a caption ("≈ API pricing equivalent") and a hover tooltip explaining that the figure reflects Anthropic API pricing, that subscription (Pro/Max/Team) marginal cost is $0, and that per-token prices don't vary by tier. `calc_cost` deliberately does **not** branch on subscription/tier — see `CONTEXT.md`.
+
 # v1.1.3 — Forward the request body verbatim (fixes modern Claude Code 400s)
 
 The proxy's request path mutated parts of the body/headers it had no reason to
