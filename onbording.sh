@@ -45,6 +45,15 @@ remove_from_zshrc() {
   sed -i '' '/ANTHROPIC_BASE_URL/d' "$ZSHRC" 2>/dev/null
 }
 
+restore_anthropic_in_zshrc() {
+  # After disabling proxy, point Claude CLI back to the real Anthropic API
+  sed -i '' '/# TokenCost/d' "$ZSHRC" 2>/dev/null
+  sed -i '' '/ANTHROPIC_BASE_URL/d' "$ZSHRC" 2>/dev/null
+  echo "" >> "$ZSHRC"
+  echo "# TokenCost" >> "$ZSHRC"
+  echo "export ANTHROPIC_BASE_URL=https://api.anthropic.com" >> "$ZSHRC"
+}
+
 remove_alias_from_zshrc() {
   # Full removal including alias (used only when uninstalling completely)
   sed -i '' '/# TokenCost/d' "$ZSHRC" 2>/dev/null
@@ -170,13 +179,36 @@ SYNC_EOF
 }
 
 disable_launchd() {
-  launchctl unload "$PLIST" 2>/dev/null
-  launchctl unsetenv ANTHROPIC_BASE_URL 2>/dev/null
-  rm -f "$PLIST"
+  # Stop the proxy and sync daemons
   launchctl unload "$PLIST_PROXY" 2>/dev/null
   rm -f "$PLIST_PROXY"
   launchctl unload "$PLIST_SYNC" 2>/dev/null
   rm -f "$PLIST_SYNC"
+
+  # Restore ANTHROPIC_BASE_URL to the real Anthropic endpoint (instead of unsetting it)
+  launchctl unload "$PLIST" 2>/dev/null
+  mkdir -p "$HOME/Library/LaunchAgents"
+  cat > "$PLIST" << 'PLIST_EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.tokencost.env</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/launchctl</string>
+        <string>setenv</string>
+        <string>ANTHROPIC_BASE_URL</string>
+        <string>https://api.anthropic.com</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
+PLIST_EOF
+  launchctl load "$PLIST" 2>/dev/null
+  launchctl setenv ANTHROPIC_BASE_URL https://api.anthropic.com 2>/dev/null
 }
 
 # ─── Menu ─────────────────────────────────────────────────────────────────────
@@ -467,24 +499,16 @@ action_disable() {
     echo -e "  ${DIM}  Proxy was not running${NC}"
   fi
 
-  if proxy_in_zshrc; then
-    echo -e "  ${CYAN}→${NC} Removing from ~/.zshrc..."
-    remove_from_zshrc
-    echo -e "  ${GREEN}✓${NC} Removed from ~/.zshrc"
-  else
-    echo -e "  ${DIM}  Nothing to remove from ~/.zshrc${NC}"
-  fi
+  echo -e "  ${CYAN}→${NC} Restoring ANTHROPIC_BASE_URL → api.anthropic.com in ~/.zshrc..."
+  restore_anthropic_in_zshrc
+  echo -e "  ${GREEN}✓${NC} ~/.zshrc updated"
 
-  if launchd_active; then
-    echo -e "  ${CYAN}→${NC} Removing global env variable (VS Code)..."
-    disable_launchd
-    echo -e "  ${GREEN}✓${NC} Removed from launchd"
-    echo -e "  ${DIM}  ⚠ Restart VS Code for changes to take effect${NC}"
-  else
-    echo -e "  ${DIM}  launchd was not configured${NC}"
-  fi
+  echo -e "  ${CYAN}→${NC} Restoring global env variable for VS Code..."
+  disable_launchd
+  echo -e "  ${GREEN}✓${NC} launchd updated (ANTHROPIC_BASE_URL=https://api.anthropic.com)"
+  echo -e "  ${DIM}  ⚠ Restart VS Code for changes to take effect${NC}"
 
-  unset ANTHROPIC_BASE_URL
+  export ANTHROPIC_BASE_URL=https://api.anthropic.com
 
   # Ensure the `tokencost` alias survives disable so the user can re-enable later
   if ! grep -q "alias tokencost=" "$ZSHRC" 2>/dev/null; then
@@ -502,7 +526,8 @@ action_disable() {
 
   echo ""
   echo -e "  ${GREEN}Done. TokenCost proxy disabled.${NC}"
-  echo -e "  ${DIM}  Open a new terminal — old tabs may still have ANTHROPIC_BASE_URL set.${NC}"
+  echo -e "  ${DIM}  Claude will now go directly to api.anthropic.com.${NC}"
+  echo -e "  ${DIM}  Open a new terminal — old tabs may still have the old URL cached.${NC}"
   echo -e "  ${DIM}  Run ${BOLD}tokencost${NC}${DIM} anytime to re-enable.${NC}"
   echo ""
   echo -ne "  Press Enter..."
