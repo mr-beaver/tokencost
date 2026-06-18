@@ -679,14 +679,15 @@ async def proxy_anthropic(path: str, request: Request):
         # Also set effort:low when routing TO Haiku
         if routed and "haiku" in routed.lower() and score <= 2:
             body_data.setdefault("output_config", {})["effort"] = "low"
-        # strip effort/thinking/betas — effort causes 400 on current API version
-        for key in ("effort", "thinking", "betas"):
-            body_data.pop(key, None)
-        # effort may also live inside output_config
-        if "output_config" in body_data:
-            body_data["output_config"].pop("effort", None)
-            if not body_data["output_config"]:
-                body_data.pop("output_config")
+        # strip effort/betas only for Haiku — other models support these fields
+        target = routed or orig_model or ""
+        if "haiku" in target.lower():
+            for key in ("effort", "betas"):
+                body_data.pop(key, None)
+            if "output_config" in body_data:
+                body_data["output_config"].pop("effort", None)
+                if not body_data["output_config"]:
+                    body_data.pop("output_config")
 
         # ── Cost optimizations ─────────────────────────────────────────────────
         body_data, cost_optimizations = optimize_request(body_data)
