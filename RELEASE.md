@@ -1,3 +1,11 @@
+# v1.1.3 — fix: effort/betas stripping and disable restore
+
+- **Fix: effort/betas now only stripped for Haiku** — previously stripped unconditionally from all requests, silently degrading extended thinking on Sonnet/Opus routes
+- **Fix: thinking field no longer stripped** — valid on all models, was incorrectly removed
+- **Fix: disable restores ANTHROPIC_BASE_URL** — instead of unsetting the variable, disable now points it back to `api.anthropic.com` so VS Code and Claude CLI keep working without restart
+
+---
+
 # v1.1.2 — docs: update info.md with v1.1.1 scoring changes
 
 - Updated scoring table: file path +1→+2, tool calls flat→depth-proportional, "add a" removal documented
