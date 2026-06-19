@@ -501,7 +501,7 @@ def route_model(body_bytes: bytes) -> tuple[str | None, str | None, int]:
 
 def _parse_anthropic(content: bytes, content_type: str):
     """Parse Anthropic SSE or JSON response → (model, input, output, cr, cw, stop, tools, tool_names, msg_id)."""
-    input_tok = output_tok = cache_read = cache_creation = tool_count = 0
+    input_tok = output_tok = cache_read = cache_creation = cache_creation_1h = tool_count = 0
     tool_names: list = []
     model = "unknown"
     stop_reason = None
@@ -529,6 +529,8 @@ def _parse_anthropic(content: bytes, content_type: str):
                     input_tok     += u.get("input_tokens", 0)
                     cache_read     = u.get("cache_read_input_tokens", 0)
                     cache_creation = u.get("cache_creation_input_tokens", 0)
+                    # 1h-TTL portion of the cache write (priced at 2x vs 1.25x for 5m)
+                    cache_creation_1h = (u.get("cache_creation") or {}).get("ephemeral_1h_input_tokens", 0)
                 elif t == "message_delta":
                     d = ev.get("delta", {})
                     if d.get("stop_reason"):
@@ -552,10 +554,11 @@ def _parse_anthropic(content: bytes, content_type: str):
             output_tok     = u.get("output_tokens", 0)
             cache_read     = u.get("cache_read_input_tokens", 0)
             cache_creation = u.get("cache_creation_input_tokens", 0)
+            cache_creation_1h = (u.get("cache_creation") or {}).get("ephemeral_1h_input_tokens", 0)
             tool_count     = sum(1 for b in data.get("content", []) if b.get("type") == "tool_use")
     except Exception:
         pass
-    return model, input_tok, output_tok, cache_read, cache_creation, stop_reason, tool_count, tool_names, msg_id
+    return model, input_tok, output_tok, cache_read, cache_creation, cache_creation_1h, stop_reason, tool_count, tool_names, msg_id
 
 
 def _parse_openai(content: bytes, content_type: str, req_model: str):
@@ -607,12 +610,13 @@ def _parse_openai(content: bytes, content_type: str, req_model: str):
 def _record(source, model, input_tok, output_tok, cr, cw,
             duration_ms, status, ua, stop_reason, tool_count, tool_names,
             effort="standard", prompt_preview="", msg_uuid=None, auto_thinking=False,
-            optimizations_json=None, optimizer_savings_usd=0):
-    cost = calc_cost(model, input_tok, output_tok, cr, cw)
+            optimizations_json=None, optimizer_savings_usd=0, cw_1h=0):
+    cost = calc_cost(model, input_tok, output_tok, cr, cw, cw_1h)
     save_request(source, model, input_tok, output_tok, cr, cw,
                  cost, duration_ms, status, ua, stop_reason, tool_count,
                  json.dumps(tool_names) if tool_names else None, effort,
-                 prompt_preview, msg_uuid, auto_thinking, optimizations_json, optimizer_savings_usd)
+                 prompt_preview, msg_uuid, auto_thinking, optimizations_json, optimizer_savings_usd,
+                 cache_creation_1h=cw_1h)
     print(f"  [{source}] {model} | in={input_tok} cr={cr} cw={cw} out={output_tok} | ${cost:.5f} | {duration_ms}ms")
 
 
@@ -725,7 +729,7 @@ async def proxy_anthropic(path: str, request: Request):
 
     duration_ms  = int((time.time() - t0) * 1000)
     content_type = resp.headers.get("content-type", "")
-    model, inp, out, cr, cw, stop, tools, tool_names, msg_id = _parse_anthropic(
+    model, inp, out, cr, cw, cw_1h, stop, tools, tool_names, msg_id = _parse_anthropic(
         resp.content, content_type)
 
     # Track per-session cache state so next request can decide whether to route
@@ -738,7 +742,7 @@ async def proxy_anthropic(path: str, request: Request):
 
     _record(source, model, inp, out, cr, cw, duration_ms,
             resp.status_code, ua, stop, tools, tool_names, effort, preview, msg_id, auto_thinking,
-            opt_json, opt_savings)
+            opt_json, opt_savings, cw_1h=cw_1h)
 
     # ── Cache successful response for deduplication ──────────────────────────────
     if resp.status_code == 200:
