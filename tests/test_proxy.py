@@ -953,3 +953,54 @@ class TestStreamUpstream:
         assert resp.status_code == 502
         assert len(calls) == 1
         assert calls[0] == (502, False)
+
+
+class TestProxyOpenAICompat:
+    """Integration tests for the /<provider>/v1/* handler."""
+
+    _PROV = list(proxy.PROVIDER_URLS)[0]
+    _OAI_SSE = [
+        (b'data: {"model":"test-model","choices":[{"index":0,'
+         b'"delta":{"content":"hi"}}]}\n\n'),
+        (b'data: {"model":"test-model","choices":[{"index":0,'
+         b'"finish_reason":"stop"}],"usage":{"prompt_tokens":11,'
+         b'"completion_tokens":4}}\n\n'),
+        b'data: [DONE]\n\n',
+    ]
+
+    @respx.mock
+    def test_streamed_openai_records_with_provider_prefix(self, test_client, tmp_db):
+        upstream_url = f"{proxy.PROVIDER_URLS[self._PROV]}/v1/chat/completions"
+        respx.post(upstream_url).mock(side_effect=_stream_factory(self._OAI_SSE))
+        resp = test_client.post(
+            f"/{self._PROV}/v1/chat/completions",
+            json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}]},
+            headers={"authorization": "Bearer k"})
+        assert resp.status_code == 200
+        con = sqlite3.connect(tmp_db)
+        model, inp, out = con.execute(
+            "SELECT model, input_tokens, output_tokens FROM requests").fetchone()
+        con.close()
+        assert model == f"{self._PROV}/test-model"
+        assert (inp, out) == (11, 4)
+
+    @respx.mock
+    def test_openai_disconnect_records_incomplete(self, tmp_db):
+        upstream_url = f"{proxy.PROVIDER_URLS[self._PROV]}/v1/chat/completions"
+        respx.post(upstream_url).mock(side_effect=_stream_factory(self._OAI_SSE))
+        body_bytes = json.dumps(
+            {"model": "test-model", "messages": [{"role": "user", "content": "x"}]}).encode()
+
+        async def run():
+            req = _make_post_request(f"{self._PROV}/v1/chat/completions", body_bytes,
+                                     {"authorization": "Bearer k"})
+            resp = await proxy.proxy_openai_compat(self._PROV, "chat/completions", req)
+            it = resp.body_iterator
+            await it.__anext__()
+            await it.aclose()
+
+        asyncio.run(run())
+        con = sqlite3.connect(tmp_db)
+        stop = con.execute("SELECT stop_reason FROM requests").fetchone()[0]
+        con.close()
+        assert stop == "incomplete"

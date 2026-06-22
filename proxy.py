@@ -863,33 +863,20 @@ async def proxy_openai_compat(provider: str, path: str, request: Request):
         source = provider  # label by provider when UA is generic
 
     upstream = PROVIDER_URLS[provider]
-    async with httpx.AsyncClient(timeout=120) as client:
-        resp = await client.request(
-            method=request.method,
-            url=f"{upstream}/v1/{path}",
-            headers=headers,
-            content=body_bytes,
-        )
 
-    duration_ms  = int((time.time() - t0) * 1000)
-    content_type = resp.headers.get("content-type", "")
-    model, inp, out, cr, cw, stop, tools, tool_names = _parse_openai(
-        resp.content, content_type, req_model)
+    def finalize(status, content_type, full_bytes, duration_ms, completed):
+        model, inp, out, cr, cw, stop, tools, tool_names = _parse_openai(
+            full_bytes, content_type, req_model)
+        if not completed and not stop:
+            stop = "incomplete"
+        # Tag model with provider prefix if bare name
+        if "/" not in model:
+            model = f"{provider}/{model}"
+        _record(source, model, inp, out, cr, cw, duration_ms,
+                status, ua, stop, tools, tool_names, prompt_preview=preview)
 
-    # Tag model with provider prefix if bare name
-    if "/" not in model:
-        model = f"{provider}/{model}"
-
-    _record(source, model, inp, out, cr, cw, duration_ms,
-            resp.status_code, ua, stop, tools, tool_names, prompt_preview=preview)
-
-    skip_resp = {"content-encoding", "content-length", "transfer-encoding"}
-    return Response(
-        content=resp.content,
-        status_code=resp.status_code,
-        headers={k: v for k, v in resp.headers.items() if k.lower() not in skip_resp},
-        media_type=resp.headers.get("content-type"),
-    )
+    return await stream_upstream(
+        request.method, f"{upstream}/v1/{path}", headers, body_bytes, 120, finalize, t0)
 
 
 # ── API endpoints ─────────────────────────────────────────────────────────────
