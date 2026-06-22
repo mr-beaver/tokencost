@@ -1,3 +1,31 @@
+# v1.1.6 — Stream upstream responses (fixes long-request timeouts)
+
+The proxy **buffered** the entire upstream response before sending any bytes to the
+client. On a long request it sent zero bytes until the upstream was 100% complete,
+so a streaming client (Claude Code, or any `stream: true` request) hit its
+idle/per-read timeout and aborted with `API error · Retrying` — even though the
+proxy then completed and recorded a 200 for the request the client had abandoned.
+
+- **Responses now stream.** A shared `stream_upstream` helper opens the upstream
+  request with `client.send(stream=True)` and returns a `StreamingResponse` that tees
+  each chunk to the client while accumulating the full body. Per-read timeout is kept
+  (resets on every chunk); there is **no** total-duration cap. Covers both the
+  Anthropic `/v1/*` and OpenAI-compat `/{provider}/v1/*` handlers. Request-side
+  handling is unchanged (`docs/adr/0001`).
+- **Usage accounting is unchanged.** The full teed body is parsed once after the
+  stream ends, so token/cache/tool accounting, optimizer savings, and cache-state
+  tracking are identical to the old buffered parse.
+- **Dedup cache round-trips the content-type.** Cached streaming bodies now replay as
+  `text/event-stream` instead of a hardcoded `application/json`. Dedup still caches
+  only fully-received 200s.
+- **Partial/aborted streams are visible, not silent.** Client disconnect, mid-stream
+  error, and connect-time failure record `stop_reason="incomplete"` (connect failures
+  also record status 502 and return a real error instead of a raw 500) — no schema
+  change. Previously a disconnected stream masqueraded as a clean 200.
+- **Tests:** 344 passing (12 new streaming tests — incremental delivery, SSE
+  accounting, dedup content-type round-trip, disconnect/partial, connect failure,
+  JSON-through-stream, OpenAI-compat streaming).
+
 # v1.1.5 — Add pytest suite and CI workflow
 
 - **332 tests** across 6 modules: request passthrough, routing normalization, cache injection, cost accounting (TTL multipliers), response parsing, optimizer dedup/routing-skip, importer dedup/cutoff guard, DB aggregations.
