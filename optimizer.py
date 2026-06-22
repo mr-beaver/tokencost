@@ -9,7 +9,7 @@ import hashlib
 import json
 
 # ── Request deduplication cache ────────────────────────────────────────────────
-_dedup_cache: dict = {}  # hash → (response, timestamp)
+_dedup_cache: dict = {}  # hash → (response, timestamp, content_type)
 _DEDUP_TTL_SEC = 5        # default: 5s for normal requests
 _DEDUP_TTL_TOOL_SEC = 15  # extended: 15s for tool_result requests (content stable within a tool chain)
 
@@ -159,25 +159,27 @@ def dedup_check(body_bytes: bytes, now: float) -> tuple:
     Check if identical request was processed recently.
     Tool_result requests (mid tool-chain) use a 15s window since their content
     is stable within a single tool chain. Other requests use 5s.
-    Returns (cached_response, req_hash) if found, else (None, req_hash).
+    Returns (cached_response, content_type, req_hash) if found,
+    else (None, None, req_hash).
     """
     req_hash = hashlib.sha256(body_bytes).hexdigest()
     ttl = _DEDUP_TTL_TOOL_SEC if _is_tool_result_request(body_bytes) else _DEDUP_TTL_SEC
     if req_hash in _dedup_cache:
-        cached_resp, cached_ts = _dedup_cache[req_hash]
+        cached_resp, cached_ts, cached_ct = _dedup_cache[req_hash]
         if now - cached_ts < ttl:
-            return cached_resp, req_hash
+            return cached_resp, cached_ct, req_hash
         else:
             del _dedup_cache[req_hash]
-    return None, req_hash
+    return None, None, req_hash
 
 
-def dedup_cache_response(req_hash: str, response: bytes, now: float):
+def dedup_cache_response(req_hash: str, response: bytes, now: float,
+                         content_type: str = "application/json"):
     """Store successful response in dedup cache."""
     if len(_dedup_cache) > 500:
         oldest = min(_dedup_cache, key=lambda k: _dedup_cache[k][1])
         del _dedup_cache[oldest]
-    _dedup_cache[req_hash] = (response, now)
+    _dedup_cache[req_hash] = (response, now, content_type)
 
 
 def tool_result_get(tool_name: str, tool_input: dict, now: float) -> str | None:

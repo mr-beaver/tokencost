@@ -176,63 +176,82 @@ class TestDedupCache:
 
     def test_miss_on_first_call(self):
         body = b'{"model": "x"}'
-        cached, req_hash = optimizer.dedup_check(body, now=1000.0)
+        cached, _ct, req_hash = optimizer.dedup_check(body, now=1000.0)
         assert cached is None
         assert req_hash == hashlib.sha256(body).hexdigest()
 
     def test_hit_within_ttl(self):
         body = b'{"model": "x"}'
-        _, req_hash = optimizer.dedup_check(body, now=1000.0)
+        _, _ct, req_hash = optimizer.dedup_check(body, now=1000.0)
         optimizer.dedup_cache_response(req_hash, b"response-data", now=1000.0)
 
-        cached, _ = optimizer.dedup_check(body, now=1004.9)  # < 5s TTL
+        cached, _ct, _ = optimizer.dedup_check(body, now=1004.9)  # < 5s TTL
         assert cached == b"response-data"
 
     def test_miss_after_ttl_expired(self):
         body = b'{"model": "x"}'
-        _, req_hash = optimizer.dedup_check(body, now=1000.0)
+        _, _ct, req_hash = optimizer.dedup_check(body, now=1000.0)
         optimizer.dedup_cache_response(req_hash, b"old-response", now=1000.0)
 
-        cached, _ = optimizer.dedup_check(body, now=1005.1)  # > 5s TTL
+        cached, _ct, _ = optimizer.dedup_check(body, now=1005.1)  # > 5s TTL
         assert cached is None
 
     def test_different_body_is_miss(self):
         body1 = b'{"model": "a"}'
         body2 = b'{"model": "b"}'
-        _, h1 = optimizer.dedup_check(body1, now=1000.0)
+        _, _ct, h1 = optimizer.dedup_check(body1, now=1000.0)
         optimizer.dedup_cache_response(h1, b"resp-a", now=1000.0)
 
-        cached, _ = optimizer.dedup_check(body2, now=1001.0)
+        cached, _ct, _ = optimizer.dedup_check(body2, now=1001.0)
         assert cached is None
 
     def test_tool_result_uses_extended_ttl(self):
         body = _body_tool_result()
-        _, req_hash = optimizer.dedup_check(body, now=1000.0)
+        _, _ct, req_hash = optimizer.dedup_check(body, now=1000.0)
         optimizer.dedup_cache_response(req_hash, b"tool-resp", now=1000.0)
 
         # At 14.9s — within the 15s tool TTL, outside the 5s normal TTL
-        cached, _ = optimizer.dedup_check(body, now=1014.9)
+        cached, _ct, _ = optimizer.dedup_check(body, now=1014.9)
         assert cached == b"tool-resp"
 
     def test_tool_result_ttl_still_expires(self):
         body = _body_tool_result()
-        _, req_hash = optimizer.dedup_check(body, now=1000.0)
+        _, _ct, req_hash = optimizer.dedup_check(body, now=1000.0)
         optimizer.dedup_cache_response(req_hash, b"tool-resp", now=1000.0)
 
-        cached, _ = optimizer.dedup_check(body, now=1015.1)  # > 15s
+        cached, _ct, _ = optimizer.dedup_check(body, now=1015.1)  # > 15s
         assert cached is None
 
     def test_eviction_at_capacity(self):
         # Fill the cache past the 500-entry limit; the oldest should be evicted.
         for i in range(501):
             key = f"key-{i:04d}"
-            optimizer._dedup_cache[key] = (b"resp", float(i))
+            optimizer._dedup_cache[key] = (b"resp", float(i), "application/json")
         # Insert one more via the public API (simulates real store)
         body = b'{"model": "new"}'
-        _, req_hash = optimizer.dedup_check(body, now=9999.0)
+        _, _ct, req_hash = optimizer.dedup_check(body, now=9999.0)
         optimizer.dedup_cache_response(req_hash, b"new-resp", now=9999.0)
         # Cache should not exceed 501 (evicted one before adding)
         assert len(optimizer._dedup_cache) <= 501
+
+    def test_dedup_roundtrips_content_type(self):
+        optimizer._dedup_cache.clear()
+        body = b'{"model":"claude-opus-4-8","messages":[{"role":"user","content":"ct test"}]}'
+        _, _, req_hash = optimizer.dedup_check(body, now=1000.0)
+        optimizer.dedup_cache_response(
+            req_hash, b"data: {}\n\n", now=1000.0, content_type="text/event-stream")
+        cached, ct, _ = optimizer.dedup_check(body, now=1001.0)
+        assert cached == b"data: {}\n\n"
+        assert ct == "text/event-stream"
+
+    def test_dedup_default_content_type_is_json(self):
+        optimizer._dedup_cache.clear()
+        body = b'{"model":"x","messages":[{"role":"user","content":"default ct"}]}'
+        _, _, req_hash = optimizer.dedup_check(body, now=2000.0)
+        optimizer.dedup_cache_response(req_hash, b"{}", now=2000.0)
+        cached, ct, _ = optimizer.dedup_check(body, now=2001.0)
+        assert cached == b"{}"
+        assert ct == "application/json"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
