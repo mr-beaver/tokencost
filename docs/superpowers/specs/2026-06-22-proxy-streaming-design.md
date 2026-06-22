@@ -64,8 +64,32 @@ dedup caching — without re-introducing a total-duration timeout cap.
 | Scope | `/v1/*` (`proxy_anthropic`) + OpenAI-compat (`proxy_openai_compat`) via one shared helper | Both real-streaming handlers have the identical bug; a shared helper makes covering both ~the same work as one. `/api/oauth/*` left buffered. |
 | Parse strategy | Parse-after (accumulate full buffer, parse once in `finalize`) | `_parse_anthropic`/`_parse_openai` already work on the full buffer; no tee-while-parsing complexity. |
 | Client disconnect | Best-effort partial record in `finally`; dedup cache **only** on `completed and status==200` | Single code path; captures input-token reality (`message_start` arrives first). A partial/abandoned body is never a valid response to replay, so it must not be cached. |
-| JSON vs SSE | Same path for both — no content-type branching | The parser already detects `text/event-stream` vs JSON; a JSON body simply arrives as one/few chunks. |
+| JSON vs SSE | Same path for both — no content-type branching (**default; flagged for maintainer review**, see note below) | The parser already detects `text/event-stream` vs JSON; a JSON body simply arrives as one/few chunks. |
 | httpx timeout | Keep per-read (`timeout=120`); **never** a total-duration cap | Per-read resets on each chunk — a 600s stream that keeps emitting never trips it; a hung upstream does. |
+| Partial-stream representation | On `completed=False`, stamp `stop_reason="incomplete"` when the parsed `stop_reason` is `NULL` | Head was 200 so `status=200` is truthful; without a marker a disconnected/errored stream masquerades as a clean short 200 and undercounts usage. Sentinel needs **no schema migration**, is queryable, and is grep-confirmed safe across `db.py` aggregations (new bucket only) and `dashboard.html` `stopBadge` (graceful fallthrough). A dedicated `completed` column was rejected as scope creep. Residual output-token undercount on disconnect is accepted (those tokens were never received). |
+
+### Open question for maintainer review: uniform streaming vs. branch
+
+The no-branching decision means **every** response through these handlers
+(`count_tokens`, model-list `GET`s, `stream:false` completions, error bodies) goes
+from a buffered `Response` with `Content-Length` to a chunked `StreamingResponse` —
+the blast radius is *all* `/v1/*` + OpenAI-compat traffic, not just streaming
+clients. The response head (status, content-type, presence of upstream
+`Content-Length`) is known after `send()` and before the body, so a branch is
+cheaply available: *"if not `text/event-stream` and `Content-Length` present, buffer
+and return as today; else stream."*
+
+- **Recommended default (this design): uniform streaming.** Chunked delivery of a
+  small JSON body is universally handled by HTTP clients; one code path avoids the
+  dual-path drift ADR-0001 was written to kill; the accounting pipeline already runs
+  for every response, so it's parity there.
+- **Accepted trade-off:** a client or chained proxy that *requires* `Content-Length`
+  on a non-streaming endpoint would now see chunked encoding.
+- **Escape hatch if the maintainer prefers minimal behavior change:** branch on the
+  response head to keep non-streaming responses buffered. Reversible later — not a
+  one-way door.
+
+Deferred to the project owner (`mr-beaver`) to confirm on the PR.
 
 ## Architecture
 
@@ -91,8 +115,18 @@ async def stream_upstream(method, url, headers, body_bytes, timeout, finalize):
 - Keeps each handler's domain logic where it lives (ADR-0001); streaming change is
   one well-tested unit.
 
-The dedup short-circuit (`proxy.py:684`) is unchanged — a cache hit returns a
-small buffered `Response` immediately.
+The dedup short-circuit (`proxy.py:684`) still returns a buffered `Response`
+immediately on a cache hit — but its **content-type handling changes**. Today the
+hit hardcodes `content-type: application/json` and `dedup_cache_response` stores
+only body bytes (`optimizer.py:180`). Once finalize caches completed streams, the
+cached body is commonly `text/event-stream`, so replaying it as JSON hands a
+streaming client (the exact traffic this change targets, which retries) a malformed
+body. Fix: widen the cache entry to carry the content-type —
+`_dedup_cache[req_hash] = (response, content_type, now)` — and replay with the
+stored `media_type`. A buffered SSE body replayed with the correct content-type is
+safe because a dedup hit is instant (no idle-timeout concern). This touches
+`dedup_cache_response`, `dedup_check`, and the short-circuit return (~3 lines), and
+each handler's `finalize` passes the captured `content_type` when caching.
 
 ### Data flow & lifecycle
 
@@ -139,9 +173,9 @@ Why this shape:
    chunks; `finalize` calls the same parser (detects JSON vs SSE via `content_type`).
 2. **Upstream error mid-stream** — `aiter_bytes()` raises; exception propagates
    out of the generator (correct: terminates the client connection, signalling an
-   incomplete response). `finally` still runs: `completed=False`, partial record,
-   **skip** dedup cache. We do not swallow the exception (that would make a
-   truncated stream look clean).
+   incomplete response). `finally` still runs: `completed=False`, partial record
+   (`stop_reason="incomplete"` when parsed reason is `NULL`), **skip** dedup cache.
+   We do not swallow the exception (that would make a truncated stream look clean).
 3. **Upstream non-200 (401/429/5xx)** — comes back as the response head before
    any body; `StreamingResponse` built with the right status; small JSON error
    body streams through; `finalize` records the real status. Preserves current
@@ -157,10 +191,18 @@ Why this shape:
 6. **Client disconnect (`GeneratorExit`)** — Starlette calls `.aclose()` on the
    generator, raising `GeneratorExit` at the `yield`. `finally` runs (awaits
    during async-gen close are permitted as long as we don't `yield`): close
-   upstream, partial record, skip cache. `completed=False`.
+   upstream, partial record (`stop_reason="incomplete"`), skip cache. `completed=False`.
 7. **`finalize` wrapped in try/except** — accounting (DB write, optimizer, parse)
    must never propagate an exception that corrupts the response lifecycle
    (matches the existing `except Exception: pass` philosophy around optimizer calls).
+8. **Connect-time / pre-body transport failure** (DNS, connection refused, connect
+   timeout) — `client.send(..., stream=True)` raises in the handler body *before*
+   `StreamingResponse`/`gen()` exist, so `finalize` never runs and the client (not
+   opened via `async with`) would leak. Wrap `send()` in try/except: on failure
+   `await client.aclose()`, write a best-effort `completed=False` record (status 502),
+   and return a small JSON error `Response` with a real status. This is the one
+   failure mode the streaming shape introduces that the buffered `async with` form
+   handled implicitly (it at least closed the client).
 
 ## Test plan (TDD, respx)
 
@@ -170,12 +212,21 @@ longer prove streaming. Write streaming assertions first.
 
 New tests in `tests/test_proxy.py`:
 
-- **Bytes arrive incrementally** — respx streamed mock (byte-iterator side-effect)
-  emitting `message_start` … `message_delta` across multiple chunks; assert the
-  handler returns a streamed `text/event-stream` response, body reassembles
-  correctly, and a DB row with parsed usage is written. (TestClient consumes the
-  whole stream, so the strongest portable assertion is correct reassembly +
-  streamed response type + recorded row.)
+- **Incremental delivery (direct-handler)** — the test that earns the name. Call
+  `proxy_anthropic` directly with a constructed `Request` (per the existing
+  `TestDetectSource` precedent — bypasses the pytest-anyio TestClient interference),
+  get the `StreamingResponse` back, and iterate `response.body_iterator`. respx mock
+  yields N discrete chunks via an `aiter_bytes` side-effect; assert the iterator
+  **yields ≥2 times** and that `finalize`'s DB row is **not** written until the
+  iterator is exhausted. This proves tee-while-streaming and guards against silent
+  re-buffering (a buffered body would still reassemble and record — only this test
+  fails if someone reintroduces buffering).
+- **Streamed response round-trips and records (TestClient)** — realistic full-path
+  coverage: respx streamed mock emitting `message_start` … `message_delta`; assert
+  the handler returns a `text/event-stream` response, body reassembles correctly,
+  and a DB row with parsed usage is written. (TestClient consumes the whole stream,
+  so this proves correct reassembly + recording, not incremental arrival — that's
+  the direct-handler test above.)
 - **SSE usage accounting through streaming** — multi-event SSE body; assert the
   row has model (from `message_start`), `output_tokens` (from `message_delta`),
   cache-read/creation + 1h-split, tool counts (from `content_block_start`) —
@@ -183,10 +234,18 @@ New tests in `tests/test_proxy.py`:
 - **Dedup still works** — stream a 200 to completion; assert full body is
   dedup-cached and a second identical request is served from cache (one upstream call).
 - **Disconnect → partial record, no cache** — consumer abandons mid-stream; assert
-  a best-effort row is written and the dedup cache is **not** populated (next
-  identical request hits upstream again).
-- **Upstream error mid-stream** — connection terminates; partial row recorded; no
-  cache entry.
+  a best-effort row is written with `stop_reason="incomplete"`, `status=200`, and
+  the dedup cache is **not** populated (next identical request hits upstream again).
+- **Upstream error mid-stream** — connection terminates; partial row recorded with
+  the `"incomplete"` sentinel; no cache entry.
+- **Connect-time failure** (Q1) — respx mock raises a transport error on `send()`;
+  assert the client is closed (no leak), a best-effort `completed=False` row is
+  recorded (status 502, `stop_reason="incomplete"`), and a JSON error `Response`
+  with a real status is returned — not a raw 500.
+- **Dedup content-type round-trips** (Q3) — stream a 200 `text/event-stream` body to
+  completion, then issue an identical request; assert the dedup hit replays with
+  `content-type: text/event-stream` (not the old hardcoded `application/json`) and
+  no second upstream call.
 - **Non-200 propagates** — keep/adapt `test_upstream_error_propagated`.
 - **JSON (non-SSE) response** still records correctly through the streaming path
   (guards the no-branching decision).
@@ -196,9 +255,19 @@ New tests in `tests/test_proxy.py`:
 Run: `./run-tests.sh` (332 existing + new), per `TESTING.md`. Fixtures `tmp_db` /
 `seed_requests` from `conftest.py`; never touch the live `tracker.db`.
 
-**Empirical verification** (after green suite): point a real Claude Code session
-at the locally-redeployed proxy and confirm bytes arrive incrementally on a long
-request (the original repro) before re-enabling `ANTHROPIC_BASE_URL`.
+**Empirical verification** (after green suite, before re-enabling
+`ANTHROPIC_BASE_URL`): reproduce the **original repro** through the redeployed
+proxy — a long request (the 300–600s class that produced `API error · Retrying`
+and an abandoned-then-200 row). Confirm the binary, bug-tied outcome:
+
+1. The Claude Code client **completes the request with no `API error · Retrying`
+   and no abort.**
+2. `tracker.db` records a **single clean 200** for it — not an abandoned-then-200
+   pair, and not a `stop_reason="incomplete"` row.
+3. *(Optional, mechanism-level)* `curl -N` (unbuffered) against the proxy on a
+   streaming request shows bytes arriving incrementally on the wire — the one place
+   incremental delivery is directly eyeballable, since the SDK otherwise abstracts
+   it.
 
 ## Rollout
 
