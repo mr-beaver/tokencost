@@ -738,17 +738,18 @@ async def proxy_anthropic(path: str, request: Request):
 
     # ── Deduplication: check if identical request came <5s ago ──────────────────
     now = time.time()
-    cached_resp, req_hash = dedup_check(body_bytes, now)
+    cached_resp, cached_ct, req_hash = dedup_check(body_bytes, now)
     if cached_resp:
         print(f"  [dedup]   returning cached response (saved API call)")
         return Response(content=cached_resp, status_code=200,
-                      headers={"content-type": "application/json"})
+                      headers={"content-type": cached_ct})
 
     t0      = time.time()
     source  = detect_source(request)
     effort  = detect_effort(body_bytes)
     ua      = request.headers.get("user-agent", "")
     preview = extract_prompt_preview(body_bytes)
+    auto_thinking = False
 
     orig_model, routed, score = route_model(body_bytes)
     try:
@@ -786,42 +787,26 @@ async def proxy_anthropic(path: str, request: Request):
         optimizations = []
         pass
 
-    async with httpx.AsyncClient(timeout=120) as client:
-        resp = await client.request(
-            method=request.method,
-            url=f"{ANTHROPIC_URL}/v1/{path}",
-            headers=headers,
-            content=body_bytes,
-        )
+    from optimizer import record_cache_state, calculate_optimization_savings
 
-    duration_ms  = int((time.time() - t0) * 1000)
-    content_type = resp.headers.get("content-type", "")
-    model, inp, out, cr, cw, cw_1h, stop, tools, tool_names, msg_id = _parse_anthropic(
-        resp.content, content_type)
+    def finalize(status, content_type, full_bytes, duration_ms, completed):
+        model, inp, out, cr, cw, cw_1h, stop, tools, tool_names, msg_id = _parse_anthropic(
+            full_bytes, content_type)
+        if not completed and not stop:
+            stop = "incomplete"
+        # Track per-session cache state so next request can decide whether to route
+        record_cache_state(model, now, body_bytes=body_bytes, cache_write_tokens=cw)
+        # Calculate optimizer savings
+        opt_json, opt_savings = calculate_optimization_savings(optimizations, model, inp, out, cr)
+        _record(source, model, inp, out, cr, cw, duration_ms,
+                status, ua, stop, tools, tool_names, effort, preview, msg_id, auto_thinking,
+                opt_json, opt_savings, cw_1h=cw_1h)
+        # Cache successful, fully-received responses for deduplication
+        if completed and status == 200:
+            dedup_cache_response(req_hash, full_bytes, now, content_type=content_type)
 
-    # Track per-session cache state so next request can decide whether to route
-    from optimizer import record_cache_state
-    record_cache_state(model, now, body_bytes=body_bytes, cache_write_tokens=cw)
-
-    # Calculate optimizer savings
-    from optimizer import calculate_optimization_savings
-    opt_json, opt_savings = calculate_optimization_savings(optimizations, model, inp, out, cr)
-
-    _record(source, model, inp, out, cr, cw, duration_ms,
-            resp.status_code, ua, stop, tools, tool_names, effort, preview, msg_id, auto_thinking,
-            opt_json, opt_savings, cw_1h=cw_1h)
-
-    # ── Cache successful response for deduplication ──────────────────────────────
-    if resp.status_code == 200:
-        dedup_cache_response(req_hash, resp.content, now)
-
-    skip_resp = {"content-encoding", "content-length", "transfer-encoding"}
-    return Response(
-        content=resp.content,
-        status_code=resp.status_code,
-        headers={k: v for k, v in resp.headers.items() if k.lower() not in skip_resp},
-        media_type=resp.headers.get("content-type"),
-    )
+    return await stream_upstream(
+        request.method, f"{ANTHROPIC_URL}/v1/{path}", headers, body_bytes, 120, finalize, t0)
 
 
 # ── Transparent passthrough for Anthropic /api/oauth/* ────────────────────────

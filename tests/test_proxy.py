@@ -376,6 +376,19 @@ def _make_request(user_agent: str | None = None) -> "Request":
     return _Request(scope)
 
 
+def _make_post_request(path, body_bytes, headers=None):
+    """Starlette Request with a body, for calling handlers directly (no TestClient)."""
+    from starlette.requests import Request as _Request
+    raw = [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]
+
+    async def _receive():
+        return {"type": "http.request", "body": body_bytes, "more_body": False}
+
+    scope = {"type": "http", "method": "POST", "path": f"/{path}",
+             "headers": raw, "query_string": b"", "server": ("127.0.0.1", 8082)}
+    return _Request(scope, receive=_receive)
+
+
 def _stream_factory(chunks, content_type="text/event-stream", status=200):
     """respx side-effect: fresh streaming httpx.Response per call (generators are single-use)."""
     def _factory(request):
@@ -745,6 +758,152 @@ class TestProxyAnthropic:
             headers={"x-api-key": "bad-key", "anthropic-version": "2023-06-01"},
         )
         assert resp.status_code == 401
+
+    _SSE_CHUNKS = [
+        (b'event: message_start\n'
+         b'data: {"type":"message_start","message":{"id":"msg_stream01",'
+         b'"model":"claude-opus-4-8","usage":{"input_tokens":42,'
+         b'"cache_read_input_tokens":7,"cache_creation_input_tokens":3,'
+         b'"cache_creation":{"ephemeral_1h_input_tokens":3}}}}\n\n'),
+        (b'event: content_block_start\n'
+         b'data: {"type":"content_block_start","content_block":'
+         b'{"type":"tool_use","name":"Read"}}\n\n'),
+        (b'event: message_delta\n'
+         b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},'
+         b'"usage":{"output_tokens":99}}\n\n'),
+    ]
+
+    @respx.mock
+    def test_streamed_sse_roundtrips_and_records(self, test_client, tmp_db):
+        import optimizer
+        optimizer._dedup_cache.clear()
+        respx.post(f"{proxy.ANTHROPIC_URL}/v1/messages").mock(
+            side_effect=_stream_factory(self._SSE_CHUNKS))
+        body = {"model": "claude-opus-4-8", "max_tokens": 256,
+                "messages": [{"role": "user", "content": "stream roundtrip unique q1"}]}
+        resp = test_client.post("/v1/messages", json=body,
+                                headers={"x-api-key": "k", "anthropic-version": "2023-06-01"})
+        assert resp.status_code == 200
+        assert "text/event-stream" in resp.headers["content-type"]
+        assert b"".join(self._SSE_CHUNKS) == resp.content
+        con = sqlite3.connect(tmp_db)
+        model, inp, out, cr, cw, cw1h, tools, stop = con.execute(
+            "SELECT model,input_tokens,output_tokens,cache_read_tokens,"
+            "cache_creation_tokens,cache_creation_1h_tokens,tool_call_count,stop_reason "
+            "FROM requests").fetchone()
+        con.close()
+        assert (model, inp, out) == ("claude-opus-4-8", 42, 99)
+        assert (cr, cw, cw1h, tools) == (7, 3, 3, 1)
+        assert stop == "end_turn"
+
+    @respx.mock
+    def test_incremental_delivery_direct_handler(self, tmp_db):
+        import optimizer
+        optimizer._dedup_cache.clear()
+        respx.post(f"{proxy.ANTHROPIC_URL}/v1/messages").mock(
+            side_effect=_stream_factory(self._SSE_CHUNKS))
+        body_bytes = json.dumps(
+            {"model": "claude-opus-4-8", "max_tokens": 256,
+             "messages": [{"role": "user", "content": "incremental unique q2"}]}).encode()
+
+        def _rowcount():
+            con = sqlite3.connect(tmp_db)
+            n = con.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
+            con.close()
+            return n
+
+        async def run():
+            req = _make_post_request("v1/messages", body_bytes,
+                                     {"x-api-key": "k", "anthropic-version": "2023-06-01"})
+            resp = await proxy.proxy_anthropic("messages", req)
+            it = resp.body_iterator
+            first = await it.__anext__()
+            mid = _rowcount()
+            rest = [c async for c in it]
+            return first, rest, mid
+
+        first, rest, mid = asyncio.run(run())
+        assert 1 + len(rest) >= 2
+        assert mid == 0
+        assert _rowcount() == 1
+
+    @respx.mock
+    def test_dedup_replays_sse_content_type(self, test_client):
+        import optimizer
+        optimizer._dedup_cache.clear()
+        upstream = respx.post(f"{proxy.ANTHROPIC_URL}/v1/messages").mock(
+            side_effect=_stream_factory(self._SSE_CHUNKS))
+        body = {"model": "claude-opus-4-8", "max_tokens": 256,
+                "messages": [{"role": "user", "content": "dedup sse ct unique q3"}]}
+        h = {"x-api-key": "k", "anthropic-version": "2023-06-01"}
+        r1 = test_client.post("/v1/messages", json=body, headers=h)
+        r2 = test_client.post("/v1/messages", json=body, headers=h)
+        assert r1.status_code == r2.status_code == 200
+        assert upstream.call_count == 1
+        assert "text/event-stream" in r2.headers["content-type"]
+        assert r2.content == b"".join(self._SSE_CHUNKS)
+
+    @respx.mock
+    def test_disconnect_records_incomplete_no_cache(self, tmp_db):
+        import optimizer
+        optimizer._dedup_cache.clear()
+        respx.post(f"{proxy.ANTHROPIC_URL}/v1/messages").mock(
+            side_effect=_stream_factory(self._SSE_CHUNKS))
+        body_bytes = json.dumps(
+            {"model": "claude-opus-4-8", "max_tokens": 256,
+             "messages": [{"role": "user", "content": "disconnect unique q4"}]}).encode()
+
+        async def run():
+            req = _make_post_request("v1/messages", body_bytes,
+                                     {"x-api-key": "k", "anthropic-version": "2023-06-01"})
+            resp = await proxy.proxy_anthropic("messages", req)
+            it = resp.body_iterator
+            await it.__anext__()
+            await it.aclose()
+
+        asyncio.run(run())
+        con = sqlite3.connect(tmp_db)
+        status, stop = con.execute(
+            "SELECT status, stop_reason FROM requests").fetchone()
+        con.close()
+        assert status == 200
+        assert stop == "incomplete"
+        assert len(optimizer._dedup_cache) == 0
+
+    @respx.mock
+    def test_connect_failure_records_502_incomplete(self, test_client, tmp_db):
+        import optimizer
+        optimizer._dedup_cache.clear()
+        respx.post(f"{proxy.ANTHROPIC_URL}/v1/messages").mock(
+            side_effect=httpx.ConnectError("refused"))
+        body = {"model": "claude-opus-4-8", "max_tokens": 256,
+                "messages": [{"role": "user", "content": "connect fail unique q5"}]}
+        resp = test_client.post("/v1/messages", json=body,
+                                headers={"x-api-key": "k", "anthropic-version": "2023-06-01"})
+        assert resp.status_code == 502
+        con = sqlite3.connect(tmp_db)
+        status, stop = con.execute("SELECT status, stop_reason FROM requests").fetchone()
+        con.close()
+        assert status == 502
+        assert stop == "incomplete"
+
+    @respx.mock
+    def test_json_response_through_streaming_path(self, test_client, tmp_db):
+        import optimizer
+        optimizer._dedup_cache.clear()
+        respx.post(f"{proxy.ANTHROPIC_URL}/v1/messages").mock(
+            return_value=httpx.Response(200, json=_MOCK_RESPONSE_BODY))
+        body = {"model": "claude-opus-4-8", "max_tokens": 256,
+                "messages": [{"role": "user", "content": "json through stream unique q6"}]}
+        resp = test_client.post("/v1/messages", json=body,
+                                headers={"x-api-key": "k", "anthropic-version": "2023-06-01"})
+        assert resp.status_code == 200
+        assert resp.json()["id"] == "msg_test001"
+        con = sqlite3.connect(tmp_db)
+        model, inp, out = con.execute(
+            "SELECT model, input_tokens, output_tokens FROM requests").fetchone()
+        con.close()
+        assert (model, inp, out) == ("claude-opus-4-8", 10, 5)
 
 
 class TestStreamUpstream:
