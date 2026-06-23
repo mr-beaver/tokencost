@@ -5,6 +5,21 @@ from datetime import datetime, timezone
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tracker.db")
 
+
+def _connect(path=None):
+    """Open tracker.db with WAL + a bounded busy-timeout.
+
+    WAL removes the rollback-journal lock-upgrade deadlock that caused
+    `database is locked`; busy_timeout makes a blocked writer wait (off the
+    request path) instead of failing instantly. DB_PATH is resolved at call
+    time so tests that monkeypatch db.DB_PATH are honored.
+    """
+    con = sqlite3.connect(path or DB_PATH, timeout=3.0)
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA busy_timeout=3000")
+    con.execute("PRAGMA synchronous=NORMAL")
+    return con
+
 PRICING = {  # all prices in $/million tokens
     # ── Anthropic Claude 4 ─────────────────────────────────────────────────────
     "claude-fable-5":             {"input": 10.0,   "output": 50.0},
@@ -300,7 +315,7 @@ def _fmt_ms(ms):
 
 
 def init_db():
-    con = sqlite3.connect(DB_PATH)
+    con = _connect()
     con.execute("""
         CREATE TABLE IF NOT EXISTS requests (
             id                    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -351,8 +366,9 @@ def save_request(source, model, input_tok, output_tok, cache_read, cache_creatio
                  cost, duration_ms, status, user_agent="", stop_reason=None,
                  tool_call_count=0, tools_json=None, effort="standard",
                  prompt_preview="", msg_uuid=None, auto_thinking=False,
-                 optimizations_json=None, optimizer_savings_usd=0, cache_creation_1h=0):
-    con = sqlite3.connect(DB_PATH)
+                 optimizations_json=None, optimizer_savings_usd=0, cache_creation_1h=0,
+                 ts=None):
+    con = _connect()
     con.execute(
         """INSERT OR IGNORE INTO requests
            (ts,source,model,input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens,
@@ -360,7 +376,7 @@ def save_request(source, model, input_tok, output_tok, cache_read, cache_creatio
             effort,prompt_preview,msg_uuid,auto_thinking,optimizations_json,optimizer_savings_usd,
             cache_creation_1h_tokens)
            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (datetime.now(timezone.utc).isoformat(), source, model,
+        (ts or datetime.now(timezone.utc).isoformat(), source, model,
          input_tok, output_tok, cache_read, cache_creation,
          cost, duration_ms, status, user_agent, stop_reason, tool_call_count, tools_json,
          effort or "standard", prompt_preview or "", msg_uuid, 1 if auto_thinking else 0,
@@ -371,7 +387,7 @@ def save_request(source, model, input_tok, output_tok, cache_read, cache_creatio
 
 
 def get_raw_logs(limit: int = 500):
-    con = sqlite3.connect(DB_PATH)
+    con = _connect()
     rows = con.execute(
         """SELECT id, ts, source, model, input_tokens, output_tokens,
                   cache_read_tokens, cache_creation_tokens, cost_usd,
@@ -422,7 +438,7 @@ def get_optimizer_stats(period="7d"):
     }
     """
     clause = _period_clause(period)
-    con = sqlite3.connect(DB_PATH)
+    con = _connect()
 
     # Get all requests with optimizations (include token/effort data for routing table)
     rows = con.execute(
@@ -567,7 +583,7 @@ def get_optimizer_stats(period="7d"):
 
 def get_sessions(period="7d", limit=50):
     clause = _period_clause(period)
-    con = sqlite3.connect(DB_PATH)
+    con = _connect()
     rows = con.execute(
         f"SELECT ts, source, cost_usd, duration_ms, tools_json, model, "
         f"input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens "
@@ -649,7 +665,7 @@ def get_sessions(period="7d", limit=50):
 
 def _tool_breakdown(period):
     clause = _period_clause(period)
-    con = sqlite3.connect(DB_PATH)
+    con = _connect()
     rows = con.execute(
         f"SELECT tools_json FROM requests WHERE 1=1 {clause} AND tools_json IS NOT NULL"
     ).fetchall()
@@ -667,7 +683,7 @@ def _tool_breakdown(period):
 
 
 def _hourly_heatmap():
-    con = sqlite3.connect(DB_PATH)
+    con = _connect()
     rows = con.execute("""
         SELECT
             date(ts, 'localtime') as day,
@@ -684,7 +700,7 @@ def _hourly_heatmap():
 
 
 def _daily_trend(period):
-    con = sqlite3.connect(DB_PATH)
+    con = _connect()
     if period == "today":
         rows = con.execute("""
             SELECT strftime('%H', ts, 'localtime') as lbl,
@@ -712,7 +728,7 @@ def _daily_trend(period):
 
 def _projection(period="7d"):
     """Monthly projection consistent with the selected period."""
-    con = sqlite3.connect(DB_PATH)
+    con = _connect()
     if period == "today":
         row = con.execute(
             "SELECT ROUND(SUM(cost_usd),4) FROM requests "
@@ -737,7 +753,7 @@ def _projection(period="7d"):
 
 def _cost_breakdown(period):
     clause = _period_clause(period)
-    con = sqlite3.connect(DB_PATH)
+    con = _connect()
     rows = con.execute(f"""
         SELECT model,
                SUM(input_tokens) as inp, SUM(output_tokens) as out,
@@ -757,7 +773,7 @@ def _cost_breakdown(period):
 
 def _cache_by_tool(period):
     clause = _period_clause(period)
-    con = sqlite3.connect(DB_PATH)
+    con = _connect()
     rows = con.execute(f"""
         SELECT REPLACE(source,'-history','') as source, model,
                COUNT(*) as reqs,
@@ -796,7 +812,7 @@ def _cache_by_tool(period):
 
 def _haiku_savings(period):
     clause = _period_clause(period)
-    con = sqlite3.connect(DB_PATH)
+    con = _connect()
     rows = con.execute(f"""
         SELECT model,
                SUM(input_tokens) as inp, SUM(output_tokens) as out,
@@ -857,7 +873,7 @@ def _haiku_savings(period):
 
 def _cache_savings(period):
     clause = _period_clause(period)
-    con = sqlite3.connect(DB_PATH)
+    con = _connect()
     rows = con.execute(f"""
         SELECT model, SUM(cache_read_tokens) as cr
         FROM requests WHERE 1=1 {clause} GROUP BY model
@@ -876,7 +892,7 @@ def _pause_analysis(period):
     clause = _period_clause(period)
     period_days = {"today": 1, "7d": 7, "30d": 30}.get(period, 7)
 
-    con = sqlite3.connect(DB_PATH)
+    con = _connect()
     rows = con.execute(
         f"SELECT ts, cache_creation_tokens, cache_creation_1h_tokens "
         f"FROM requests WHERE 1=1 {clause} ORDER BY ts"
@@ -962,7 +978,7 @@ def _health_grade(summary, period):
     total_cw  = summary.get("total_cache_creation")    or 0
     avg_inp   = total_inp / max(total_reqs, 1)
 
-    con = sqlite3.connect(DB_PATH)
+    con = _connect()
     max_tok_count = con.execute(
         f"SELECT COUNT(*) FROM requests WHERE stop_reason='max_tokens' AND 1=1 {clause}"
     ).fetchone()[0]
@@ -1037,7 +1053,7 @@ def _health_grade(summary, period):
 
 def _task_breakdown(period):
     clause = _period_clause(period)
-    con    = sqlite3.connect(DB_PATH)
+    con    = _connect()
     rows   = con.execute(
         f"SELECT tools_json, cost_usd, input_tokens, output_tokens, tool_call_count "
         f"FROM requests WHERE 1=1 {clause}"
@@ -1119,7 +1135,7 @@ def _task_breakdown(period):
 
 def _tool_breakdown_split(period):
     clause = _period_clause(period)
-    con = sqlite3.connect(DB_PATH)
+    con = _connect()
     rows = con.execute(
         f"SELECT tools_json FROM requests WHERE 1=1 {clause} AND tools_json IS NOT NULL"
     ).fetchall()
@@ -1147,7 +1163,7 @@ def _tool_breakdown_split(period):
 
 def _effort_breakdown(period):
     clause = _period_clause(period)
-    con = sqlite3.connect(DB_PATH)
+    con = _connect()
     rows = con.execute(f"""
         SELECT model,
                COALESCE(effort, 'standard') as effort,
@@ -1276,7 +1292,7 @@ def _action_plan(summary, haiku_savings, by_model, period, pause=None):
     cost        = summary.get("total_cost") or 0
     daily_rate  = cost / period_days if period_days else 0
 
-    con = sqlite3.connect(DB_PATH)
+    con = _connect()
     today_cost = (con.execute(
         "SELECT ROUND(SUM(cost_usd),4) FROM requests "
         "WHERE date(ts,'localtime')=date('now','localtime')"
@@ -1523,7 +1539,7 @@ def _action_plan(summary, haiku_savings, by_model, period, pause=None):
 
 def get_stats(period="7d"):
     clause = _period_clause(period)
-    con = sqlite3.connect(DB_PATH)
+    con = _connect()
     con.row_factory = sqlite3.Row
 
     summary = dict(con.execute(f"""
@@ -1639,7 +1655,7 @@ def get_stats(period="7d"):
 
 
 def weekly_digest():
-    con = sqlite3.connect(DB_PATH)
+    con = _connect()
     con.row_factory = sqlite3.Row
     cur  = dict(con.execute(
         "SELECT COUNT(*) as reqs, ROUND(SUM(cost_usd),2) as cost FROM requests WHERE ts >= datetime('now','-7 days')"

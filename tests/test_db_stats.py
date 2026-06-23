@@ -498,3 +498,53 @@ class TestGetSessions:
     def test_empty_db_returns_empty_list(self, seed_requests):
         sessions = db.get_sessions("all")
         assert sessions == []
+
+
+# ── WAL connection helper + request-time ts ──────────────────────────────────
+import sqlite3 as _sqlite3
+import db as _db
+
+
+class TestConnectHelper:
+    def test_connect_enables_wal(self, tmp_db):
+        con = _db._connect()
+        try:
+            mode = con.execute("PRAGMA journal_mode").fetchone()[0]
+            assert mode.lower() == "wal"
+        finally:
+            con.close()
+
+    def test_connect_sets_busy_timeout(self, tmp_db):
+        con = _db._connect()
+        try:
+            assert con.execute("PRAGMA busy_timeout").fetchone()[0] == 3000
+        finally:
+            con.close()
+
+    def test_connect_resolves_db_path_at_call_time(self, tmp_db):
+        # tmp_db already monkeypatched db.DB_PATH; _connect must honor it,
+        # not a path bound at import time.
+        con = _db._connect()
+        try:
+            dbfile = con.execute("PRAGMA database_list").fetchone()[2]
+            assert dbfile == tmp_db
+        finally:
+            con.close()
+
+
+class TestSaveRequestTimestamp:
+    def test_explicit_ts_is_stored(self, tmp_db):
+        _db.save_request("cli", "claude-opus-4-8", 1, 1, 0, 0, 0.0, 10, 200,
+                         msg_uuid="ts-explicit", ts="2026-06-23T00:00:00+00:00")
+        con = _sqlite3.connect(tmp_db)
+        ts = con.execute("SELECT ts FROM requests WHERE msg_uuid='ts-explicit'").fetchone()[0]
+        con.close()
+        assert ts == "2026-06-23T00:00:00+00:00"
+
+    def test_omitted_ts_defaults_to_now(self, tmp_db):
+        _db.save_request("cli", "claude-opus-4-8", 1, 1, 0, 0, 0.0, 10, 200,
+                         msg_uuid="ts-default")
+        con = _sqlite3.connect(tmp_db)
+        ts = con.execute("SELECT ts FROM requests WHERE msg_uuid='ts-default'").fetchone()[0]
+        con.close()
+        assert ts and ts.startswith("20")  # an ISO timestamp was stamped
