@@ -19,8 +19,10 @@ Dashboard: http://localhost:8082/dashboard
 
 import json
 import os
+import queue
 import re as _re
 import time
+from datetime import datetime, timezone
 import httpx
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response
@@ -607,17 +609,87 @@ def _parse_openai(content: bytes, content_type: str, req_model: str):
     return model, input_tok, output_tok, 0, 0, stop_reason, tool_count, []
 
 
+# ── Asynchronous accounting write ─────────────────────────────────────────────
+# Usage rows are dashboard metrics only — no agent decision depends on them, so
+# the write must never block the request path. Each request enqueues a record;
+# one daemon thread persists it. Eventual consistency is acceptable.
+_WRITE_QUEUE_MAX = 10000
+_write_queue: "queue.Queue[dict]" = queue.Queue(maxsize=_WRITE_QUEUE_MAX)
+_STOP = object()
+_writer_thread: "threading.Thread | None" = None
+
+
+def _write_one(record: dict) -> bool:
+    """Persist one queued record. Never raises — a bad row must not kill the writer."""
+    try:
+        save_request(**record)
+        return True
+    except Exception as e:
+        print(f"  [warn] accounting write failed — dropping row: {type(e).__name__}: {e}")
+        return False
+
+
+def _writer_loop():
+    while True:
+        item = _write_queue.get()
+        try:
+            if item is _STOP:
+                return
+            _write_one(item)
+        finally:
+            _write_queue.task_done()
+
+
+def _start_writer():
+    global _writer_thread
+    if _writer_thread is not None and _writer_thread.is_alive():
+        return
+    _writer_thread = threading.Thread(target=_writer_loop, name="tokencost-writer", daemon=True)
+    _writer_thread.start()
+
+
+def _stop_writer(timeout: float = 2.0):
+    """Signal the writer to finish the backlog and exit (graceful-shutdown flush)."""
+    if _writer_thread is not None and _writer_thread.is_alive():
+        _write_queue.put(_STOP)
+        _writer_thread.join(timeout=timeout)
+
+
+def _process_pending_writes():
+    """Synchronously persist all currently-queued records. Test helper (no thread)."""
+    while True:
+        try:
+            item = _write_queue.get_nowait()
+        except queue.Empty:
+            return
+        try:
+            if item is not _STOP:
+                _write_one(item)
+        finally:
+            _write_queue.task_done()
+
+
 def _record(source, model, input_tok, output_tok, cr, cw,
             duration_ms, status, ua, stop_reason, tool_count, tool_names,
             effort="standard", prompt_preview="", msg_uuid=None, auto_thinking=False,
             optimizations_json=None, optimizer_savings_usd=0, cw_1h=0):
     cost = calc_cost(model, input_tok, output_tok, cr, cw, cw_1h)
-    save_request(source, model, input_tok, output_tok, cr, cw,
-                 cost, duration_ms, status, ua, stop_reason, tool_count,
-                 json.dumps(tool_names) if tool_names else None, effort,
-                 prompt_preview, msg_uuid, auto_thinking, optimizations_json, optimizer_savings_usd,
-                 cache_creation_1h=cw_1h)
     print(f"  [{source}] {model} | in={input_tok} cr={cr} cw={cw} out={output_tok} | ${cost:.5f} | {duration_ms}ms")
+    record = dict(
+        source=source, model=model, input_tok=input_tok, output_tok=output_tok,
+        cache_read=cr, cache_creation=cw, cost=cost, duration_ms=duration_ms,
+        status=status, user_agent=ua, stop_reason=stop_reason,
+        tool_call_count=tool_count,
+        tools_json=json.dumps(tool_names) if tool_names else None,
+        effort=effort, prompt_preview=prompt_preview, msg_uuid=msg_uuid,
+        auto_thinking=auto_thinking, optimizations_json=optimizations_json,
+        optimizer_savings_usd=optimizer_savings_usd, cache_creation_1h=cw_1h,
+        ts=datetime.now(timezone.utc).isoformat(),
+    )
+    try:
+        _write_queue.put_nowait(record)
+    except queue.Full:
+        print("  [warn] accounting queue full — dropping usage row")
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -625,6 +697,7 @@ def _record(source, model, input_tok, output_tok, cr, cw,
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    _start_writer()
     weekly_digest()
     # Auto-update on startup if newer version available
     threading.Thread(target=_auto_update_on_startup, daemon=True).start()
@@ -634,6 +707,7 @@ async def lifespan(_: FastAPI):
     print(f"🔌  Providers  →  anthropic  +  {providers}\n")
     threading.Thread(target=_bg_version_check, daemon=True).start()
     yield
+    _stop_writer()
 
 
 app = FastAPI(lifespan=lifespan)

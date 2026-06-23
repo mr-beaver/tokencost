@@ -27,6 +27,8 @@ import httpx
 # ── bring proxy into scope ────────────────────────────────────────────────────
 import proxy  # noqa: E402  (conftest.py already added repo root to sys.path)
 import db     # noqa: E402
+import queue
+import threading as _threading
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -638,6 +640,7 @@ class TestProxyAnthropic:
             json=unique_body,
             headers={"x-api-key": "test-key", "anthropic-version": "2023-06-01"},
         )
+        proxy._process_pending_writes()  # flush the async accounting queue
         con = sqlite3.connect(tmp_db)
         rows = con.execute("SELECT model, input_tokens, output_tokens FROM requests").fetchall()
         con.close()
@@ -734,3 +737,81 @@ class TestProxyAnthropic:
             headers={"x-api-key": "bad-key", "anthropic-version": "2023-06-01"},
         )
         assert resp.status_code == 401
+
+
+@pytest.fixture(autouse=True)
+def _clear_write_queue():
+    """Discard any queued records so the module-global queue can't leak rows
+    between tests. Discards without writing (no DB dependency at teardown)."""
+    def _drain():
+        while True:
+            try:
+                proxy._write_queue.get_nowait()
+            except queue.Empty:
+                break
+            else:
+                proxy._write_queue.task_done()
+    _drain()
+    yield
+    _drain()
+
+
+def _rec(**over):
+    """A complete _record→save_request kwargs dict, overridable per-test."""
+    base = dict(
+        source="cli", model="claude-opus-4-8", input_tok=1, output_tok=1,
+        cache_read=0, cache_creation=0, cost=0.0, duration_ms=10, status=200,
+        user_agent="ua", stop_reason=None, tool_call_count=0, tools_json=None,
+        effort="standard", prompt_preview="", msg_uuid="m", auto_thinking=False,
+        optimizations_json=None, optimizer_savings_usd=0, cache_creation_1h=0,
+        ts="2026-06-23T00:00:00+00:00",
+    )
+    base.update(over)
+    return base
+
+
+class TestAsyncWrite:
+    def test_record_enqueues_without_blocking(self, tmp_db):
+        proxy._record("cli", "claude-opus-4-8", 7, 3, 0, 0, 12, 200,
+                      "ua", None, 0, None, msg_uuid="enq1")
+        assert proxy._write_queue.qsize() == 1
+
+    def test_pending_writes_persist_to_db(self, tmp_db):
+        proxy._write_queue.put_nowait(_rec(msg_uuid="p1", input_tok=9))
+        proxy._process_pending_writes()
+        con = sqlite3.connect(tmp_db)
+        row = con.execute("SELECT input_tokens FROM requests WHERE msg_uuid='p1'").fetchone()
+        con.close()
+        assert row == (9,)
+
+    def test_writer_skips_failing_row_and_continues(self, tmp_db, monkeypatch):
+        real = proxy.save_request
+        def flaky(**kw):
+            if kw["msg_uuid"] == "bad":
+                raise sqlite3.OperationalError("database is locked")
+            return real(**kw)
+        monkeypatch.setattr(proxy, "save_request", flaky)
+        proxy._write_queue.put_nowait(_rec(msg_uuid="bad"))
+        proxy._write_queue.put_nowait(_rec(msg_uuid="good"))
+        proxy._process_pending_writes()  # must not raise
+        con = sqlite3.connect(tmp_db)
+        uuids = {r[0] for r in con.execute("SELECT msg_uuid FROM requests").fetchall()}
+        con.close()
+        assert "good" in uuids and "bad" not in uuids
+
+    def test_record_drops_when_queue_full(self, monkeypatch):
+        monkeypatch.setattr(proxy, "_write_queue", queue.Queue(maxsize=1))
+        proxy._write_queue.put_nowait(_rec(msg_uuid="filler"))
+        proxy._record("cli", "claude-opus-4-8", 1, 1, 0, 0, 10, 200,
+                      "ua", None, 0, None, msg_uuid="dropped")  # must not raise
+        assert proxy._write_queue.qsize() == 1  # second row was dropped
+
+    def test_graceful_flush_drains_on_stop(self, tmp_db):
+        proxy._start_writer()
+        for i in range(5):
+            proxy._write_queue.put_nowait(_rec(msg_uuid=f"flush{i}"))
+        proxy._stop_writer(timeout=2.0)
+        con = sqlite3.connect(tmp_db)
+        n = con.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
+        con.close()
+        assert n == 5
