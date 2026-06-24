@@ -789,6 +789,7 @@ class TestProxyAnthropic:
         assert resp.status_code == 200
         assert "text/event-stream" in resp.headers["content-type"]
         assert b"".join(self._SSE_CHUNKS) == resp.content
+        proxy._process_pending_writes()
         con = sqlite3.connect(tmp_db)
         model, inp, out, cr, cw, cw1h, tools, stop = con.execute(
             "SELECT model,input_tokens,output_tokens,cache_read_tokens,"
@@ -810,6 +811,7 @@ class TestProxyAnthropic:
              "messages": [{"role": "user", "content": "incremental unique q2"}]}).encode()
 
         def _rowcount():
+            proxy._process_pending_writes()
             con = sqlite3.connect(tmp_db)
             n = con.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
             con.close()
@@ -865,6 +867,7 @@ class TestProxyAnthropic:
             await it.aclose()
 
         asyncio.run(run())
+        proxy._process_pending_writes()
         con = sqlite3.connect(tmp_db)
         status, stop = con.execute(
             "SELECT status, stop_reason FROM requests").fetchone()
@@ -884,6 +887,7 @@ class TestProxyAnthropic:
         resp = test_client.post("/v1/messages", json=body,
                                 headers={"x-api-key": "k", "anthropic-version": "2023-06-01"})
         assert resp.status_code == 502
+        proxy._process_pending_writes()
         con = sqlite3.connect(tmp_db)
         status, stop = con.execute("SELECT status, stop_reason FROM requests").fetchone()
         con.close()
@@ -902,6 +906,7 @@ class TestProxyAnthropic:
                                 headers={"x-api-key": "k", "anthropic-version": "2023-06-01"})
         assert resp.status_code == 200
         assert resp.json()["id"] == "msg_test001"
+        proxy._process_pending_writes()
         con = sqlite3.connect(tmp_db)
         model, inp, out = con.execute(
             "SELECT model, input_tokens, output_tokens FROM requests").fetchone()
@@ -998,6 +1003,7 @@ class TestProxyOpenAICompat:
             json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}]},
             headers={"authorization": "Bearer k"})
         assert resp.status_code == 200
+        proxy._process_pending_writes()
         con = sqlite3.connect(tmp_db)
         model, inp, out = con.execute(
             "SELECT model, input_tokens, output_tokens FROM requests").fetchone()
@@ -1021,6 +1027,7 @@ class TestProxyOpenAICompat:
             await it.aclose()
 
         asyncio.run(run())
+        proxy._process_pending_writes()
         con = sqlite3.connect(tmp_db)
         stop = con.execute("SELECT stop_reason FROM requests").fetchone()[0]
         con.close()
@@ -1029,8 +1036,8 @@ class TestProxyOpenAICompat:
 
 @pytest.fixture(autouse=True)
 def _clear_write_queue():
-    """Discard any queued records so the module-global queue can't leak rows
-    between tests. Discards without writing (no DB dependency at teardown)."""
+    """Flush pending writes to DB at teardown so integration tests can read rows.
+    Drain at setup to prevent inter-test leakage."""
     def _drain():
         while True:
             try:
